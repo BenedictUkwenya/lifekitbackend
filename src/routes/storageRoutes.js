@@ -3,7 +3,7 @@ const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const { supabase } = require('../config/supabase');
-const authenticateToken = require('../middleware/temp_auth');
+const authenticateToken = require('../middleware/authMiddleware');
 
 // Configure Multer to use memory storage so Supabase can access the buffer
 const upload = multer({ 

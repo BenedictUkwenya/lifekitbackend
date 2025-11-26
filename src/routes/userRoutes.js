@@ -2,7 +2,7 @@
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../config/supabase');
-const authenticateToken = require('../middleware/temp_auth');
+const authenticateToken = require('../middleware/authMiddleware');
 
 // Get User Profile (Authenticated)
 router.put('/profile', authenticateToken, async (req, res) => {

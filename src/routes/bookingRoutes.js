@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { supabase, supabaseAdmin } = require('../config/supabase');
-const authenticateToken = require('../middleware/temp_auth');
+const authenticateToken = require('../middleware/authMiddleware');
 
 // Base route: /bookings
 

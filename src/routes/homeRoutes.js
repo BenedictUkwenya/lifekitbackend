@@ -2,7 +2,7 @@
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../config/supabase');
-const authenticateToken = require('../middleware/temp_auth'); 
+const authenticateToken = require('../middleware/authMiddleware'); 
 
 // Get Active Offers/Banners (Public)
 router.get('/offers', async (req, res) => {
