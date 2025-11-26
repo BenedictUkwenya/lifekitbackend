@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { supabaseAdmin } = require('../config/supabase');
-const authenticateToken = require('../middleware/authMiddleware');
+const authenticateToken = require('../middleware/temp_auth');
 
 // 1. GET CONVERSATIONS (Grouped by User)
 router.get('/', authenticateToken, async (req, res) => {

@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 // IMPORT supabaseAdmin HERE
 const { supabase, supabaseAdmin } = require('../config/supabase'); 
-const authenticateToken = require('../middleware/authMiddleware');
+const authenticateToken = require('../middleware/temp_auth');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 // Helper: Get or Create Wallet (Using Admin to bypass RLS for creation)
