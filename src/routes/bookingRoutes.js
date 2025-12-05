@@ -287,4 +287,28 @@ router.get('/availability/:providerId', async (req, res) => {
   res.json({ message: "Availability endpoint placeholder" }); 
 });
 
+
+router.get('/bookings/all', async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('bookings')
+      .select(`
+        *,
+        profiles!client_id(full_name, id, profile_picture_url),
+        services(
+            title, 
+            price, 
+            currency,
+            service_categories(name), 
+            profiles:provider_id(full_name, profile_picture_url)
+        )
+      `)
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 module.exports = router;

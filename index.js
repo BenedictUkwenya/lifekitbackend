@@ -1,7 +1,6 @@
-// index.js
 require('dotenv').config();
 const express = require('express');
-const cors = require('cors');
+const cors = require('cors'); // Make sure this is installed
 
 // Import route modules
 const authRoutes = require('./src/routes/authRoutes');
@@ -11,14 +10,26 @@ const homeRoutes = require('./src/routes/homeRoutes');
 const storageRoutes = require('./src/routes/storageRoutes');
 const bookingRoutes = require('./src/routes/bookingRoutes'); 
 const walletRoutes = require('./src/routes/walletRoutes');
-const { supabase } = require('./src/config/supabase'); // For health check
-const chatRoutes = require('./src/routes/chatRoutes');
+const adminRoutes = require('./src/routes/adminRoutes'); // Don't forget this!
+const { supabase } = require('./src/config/supabase'); 
+const eventRoutes = require('./src/routes/eventRoutes');
+const feedRoutes = require('./src/routes/feedRoutes');
+const chatRoutes = require('./src/routes/chatRoutes'); 
+
+
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
-app.use(cors());
+// --- IMPORTANT: CORS CONFIGURATION ---
+// This allows your React App (on port 5173) to talk to this Backend
+app.use(cors({
+  origin: '*', // Allow ALL origins (Easiest for development)
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+// Middleware for JSON
 app.use(express.json());
 
 // --- Simple Test & Health Check Routes ---
@@ -26,28 +37,20 @@ app.get('/', (req, res) => {
   res.status(200).send('Lifekit Backend server is running!');
 });
 
-app.get('/api/supabase-status', async (req, res) => {
-  try {
-    const { data, error } = await supabase.from('profiles').select('id').limit(1); // Test database connection
-    if (error) throw error;
-    res.status(200).json({ message: 'Supabase connection successful!', db_test: data.length > 0 ? 'Data read success' : 'DB empty' });
-  } catch (error) {
-    res.status(500).json({ message: 'Supabase connection failed', error: error.message });
-  }
-});
-
-// --- Use Route Modules: Define the Base Paths ---
-app.use('/auth', authRoutes);     // Handles: /auth/signup, /auth/login, etc.
-app.use('/users', userRoutes);    // Handles: /users/profile, /users/notifications, etc.
-app.use('/services', serviceRoutes); // Handles: /services (POST), /services/:id, etc.
-app.use('/home', homeRoutes);     // Handles: /home/offers, /home/search, /home/categories, etc.
+// --- Use Route Modules ---
+app.use('/auth', authRoutes);
+app.use('/users', userRoutes);
+app.use('/services', serviceRoutes);
+app.use('/home', homeRoutes);
 app.use('/bookings', bookingRoutes);
 app.use('/storage', storageRoutes);
 app.use('/wallet', walletRoutes);
-app.use('/chats', chatRoutes);     // Handles: /chat (GET conversations), /chat/:bookingId/messages, etc.
+app.use('/admin', adminRoutes); // <--- Ensure Admin routes are registered
+app.use('/events', eventRoutes);
+app.use('/feeds', feedRoutes);
+app.use('/chats', chatRoutes); 
 // Start the server
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Supabase URL: ${process.env.SUPABASE_URL}`);
-  console.log('Backend architecture is now fully refactored and modular.');
 });

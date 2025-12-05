@@ -45,34 +45,49 @@ router.get('/my-services', authenticateToken, async (req, res) => {
  * Screen: After "Service Categories" selection
  * Body: { "category_ids": ["uuid1", "uuid2"], "currency": "USD" }
  */
+/**
+ * 2. POST /services - Bulk create new services from category selection (Authenticated)
+ * Screen: After "Service Categories" selection
+ * UPDATED: Uses the Category Name as the default Service Title
+ */
 router.post('/', authenticateToken, async (req, res) => {
-    // We now expect an array of IDs from the category selection screen
     const { category_ids, currency = 'USD' } = req.body; 
     const providerId = req.user.id; 
 
     if (!Array.isArray(category_ids) || category_ids.length === 0) {
-        return res.status(400).json({ error: 'At least one category_id is required for service creation.' });
+        return res.status(400).json({ error: 'At least one category_id is required.' });
     }
 
-    // Create an array of service objects for bulk insert (minimal initial data)
-    const servicesToInsert = category_ids.map(catId => ({
-        provider_id: providerId,
-        category_id: catId, 
-        title: `New Service Listing`, // Placeholder title for easy editing
-        description: 'Please add a detailed description.',
-        price: 0.00, 
-        currency: currency,
-        image_urls: [], // Initial empty array for images
-        service_type: 'Default',
-        status: 'pending', // Service starts as DRAFT until price/details are edited
-    }));
-
     try {
-        // BULK INSERT: Insert all selected services at once
+        // 1. Fetch the names of the selected categories
+        const { data: categories, error: catError } = await supabase
+            .from('service_categories')
+            .select('id, name')
+            .in('id', category_ids);
+
+        if (catError) {
+            console.error('Error fetching category names:', catError.message);
+            return res.status(400).json({ error: 'Invalid categories selected.' });
+        }
+
+        // 2. Prepare the services using the actual Category Names
+        const servicesToInsert = categories.map(cat => ({
+            provider_id: providerId,
+            category_id: cat.id, 
+            title: cat.name, // <--- USE CATEGORY NAME HERE (e.g., "Box Braids")
+            description: `Professional ${cat.name} services.`, // Better default description
+            price: 0.00, 
+            currency: currency,
+            image_urls: [], 
+            service_type: 'Default',
+            status: 'draft', // Start as draft
+        }));
+
+        // 3. Bulk Insert
         const { data, error } = await supabase
             .from('services')
             .insert(servicesToInsert)
-            .select(); // Return all newly created services
+            .select(); 
 
         if (error) {
             console.error('Supabase bulk create service error:', error.message);
@@ -80,8 +95,8 @@ router.post('/', authenticateToken, async (req, res) => {
         }
 
         res.status(201).json({
-            message: 'Services created successfully as drafts! Please edit details.',
-            services: data, // Note: returns an array of services
+            message: 'Services created successfully!',
+            services: data,
         });
 
     } catch (error) {
@@ -89,8 +104,6 @@ router.post('/', authenticateToken, async (req, res) => {
         res.status(500).json({ error: 'Internal server error during service creation.' });
     }
 });
-
-
 /**
  * 3. PUT /services/:id - Update a Service (Authenticated Provider)
  * Screen: "Edit Service"
@@ -122,7 +135,9 @@ router.put('/:id', authenticateToken, async (req, res) => {
     if (Object.keys(updateData).length === 0) {
         return res.status(400).json({ message: 'No service data provided for update.' });
     }
-
+       if (status === 'active' || status === 'pending') {
+        updateData.status = 'pending'; 
+    }
     try {
         const { data, error } = await supabase
             .from('services')
@@ -190,33 +205,49 @@ router.delete('/:id', authenticateToken, async (req, res) => {
  * 5. GET /services/category/:categoryId - List providers/services for a Category (Public)
  * Screen: "Hair & Beauty" provider list screen
  */
+/**
+ * 5. GET /services/category/:categoryId 
+ * Updated: Fetches services for a category OR any of its sub-categories.
+ */
 router.get('/category/:categoryId', async (req, res) => {
     const { categoryId } = req.params;
 
     try {
+        // 1. Get all Sub-Category IDs for this Parent
+        const { data: subCategories, error: subError } = await supabase
+            .from('service_categories')
+            .select('id')
+            .eq('parent_category_id', categoryId);
+
+        if (subError) throw subError;
+
+        // 2. Build a list of IDs (The Parent + All its Children)
+        const allCategoryIds = subCategories.map(c => c.id);
+        allCategoryIds.push(categoryId); 
+
+        // 3. Fetch Services belonging to ANY of these IDs
         const { data: services, error } = await supabase
             .from('services')
             .select('*, profiles:provider_id(full_name, profile_picture_url), service_categories(name)')
-            .eq('category_id', categoryId)
+            .in('category_id', allCategoryIds) // <--- The Magic Fix
             .eq('status', 'active')
-            .order('price', { ascending: true }); 
+            .order('price', { ascending: true });
 
         if (error) {
             console.error('Supabase fetch by category error:', error.message);
-            return res.status(500).json({ error: 'Failed to fetch services for this category.' });
+            return res.status(500).json({ error: 'Failed to fetch services.' });
         }
 
         res.status(200).json({
-            message: 'Services fetched by category successfully!',
+            message: 'Services fetched successfully!',
             services: services, 
         });
 
     } catch (error) {
-        console.error('Unexpected error fetching services by category:', error.message);
-        res.status(500).json({ error: 'Internal server error fetching services by category.' });
+        console.error('Unexpected error:', error.message);
+        res.status(500).json({ error: 'Internal server error.' });
     }
 });
-
 
 /**
  * 6. GET /services/provider/:providerId - List all services by a single provider (Public)
