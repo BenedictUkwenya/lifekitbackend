@@ -1,50 +1,13 @@
 // src/routes/userRoutes.js
 const express = require('express');
 const router = express.Router();
-const { supabase } = require('../config/supabase');
+// CHANGE 1: Import supabaseAdmin to bypass RLS for updates
+const { supabase, supabaseAdmin } = require('../config/supabase');
 const authenticateToken = require('../middleware/authMiddleware');
 
-// Get User Profile (Authenticated)
-router.put('/profile', authenticateToken, async (req, res) => {
-  // Add username, phone_number, bio to the destructuring
-  const { full_name, profile_picture_url, username, phone_number, bio } = req.body;
-  const userId = req.user.id;
-
-  try {
-    const updateData = {};
-    if (full_name !== undefined) updateData.full_name = full_name;
-    if (profile_picture_url !== undefined) updateData.profile_picture_url = profile_picture_url;
-    // New Fields
-    if (username !== undefined) updateData.username = username;
-    if (phone_number !== undefined) updateData.phone_number = phone_number;
-    if (bio !== undefined) updateData.bio = bio;
-
-    if (Object.keys(updateData).length === 0) {
-      return res.status(400).json({ message: 'No profile data provided for update.' });
-    }
-
-    const { data, error } = await supabase
-      .from('profiles')
-      .update(updateData)
-      .eq('id', userId)
-      .select()
-      .single();
-
-    if (error) {
-      return res.status(400).json({ error: error.message });
-    }
-
-    res.status(200).json({
-      message: 'Profile updated successfully!',
-      profile: data,
-    });
-
-  } catch (error) {
-    console.error('Unexpected profile update error:', error.message);
-    res.status(500).json({ error: 'Internal server error during profile update.' });
-  }
-});
-// Update User Profile (Authenticated)
+// =============================================================================
+// 1. GET PROFILE
+// =============================================================================
 router.get('/profile', authenticateToken, async (req, res) => {
   const userId = req.user.id;
 
@@ -75,15 +38,12 @@ router.get('/profile', authenticateToken, async (req, res) => {
 });
 
 // =============================================================================
-// 2. UPDATE PROFILE (Includes new fields: username, phone, bio)
+// 2. UPDATE PROFILE
+// Fix: Uses supabaseAdmin to bypass RLS and handles all fields including job_title
 // =============================================================================
 router.put('/profile', authenticateToken, async (req, res) => {
-  const { full_name, profile_picture_url, username, phone_number, bio } = req.body;
+  const { full_name, profile_picture_url, username, phone_number, bio, job_title } = req.body;
   const userId = req.user.id;
-
-  if (!userId) {
-    return res.status(401).json({ error: 'User not authenticated.' });
-  }
 
   try {
     const updateData = {};
@@ -92,12 +52,14 @@ router.put('/profile', authenticateToken, async (req, res) => {
     if (username !== undefined) updateData.username = username;
     if (phone_number !== undefined) updateData.phone_number = phone_number;
     if (bio !== undefined) updateData.bio = bio;
+    if (job_title !== undefined) updateData.job_title = job_title; // Added this
 
     if (Object.keys(updateData).length === 0) {
       return res.status(400).json({ message: 'No profile data provided for update.' });
     }
 
-    const { data, error } = await supabase
+    // CRITICAL FIX: Use supabaseAdmin
+    const { data, error } = await supabaseAdmin
       .from('profiles')
       .update(updateData)
       .eq('id', userId)
@@ -119,7 +81,10 @@ router.put('/profile', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Internal server error during profile update.' });
   }
 });
-// Get User Notifications (Authenticated)
+
+// =============================================================================
+// 3. GET NOTIFICATIONS
+// =============================================================================
 router.get('/notifications', authenticateToken, async (req, res) => {
   const userId = req.user.id;
 
@@ -146,26 +111,27 @@ router.get('/notifications', authenticateToken, async (req, res) => {
   }
 });
 
-// Mark Notification as Read (Authenticated)
+// =============================================================================
+// 4. MARK NOTIFICATION AS READ
+// =============================================================================
 router.put('/notifications/:notificationId/read', authenticateToken, async (req, res) => {
   const userId = req.user.id;
   const { notificationId } = req.params;
 
   try {
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin // Changed to Admin to be safe
       .from('notifications')
       .update({ is_read: true })
       .eq('id', notificationId)
-      .eq('user_id', userId) // Ensure user can only mark their own notifications as read
+      .eq('user_id', userId)
       .select()
       .single();
 
     if (error) {
-      if (error.code === 'PGRST116') { // No rows found or not owned by user
-        return res.status(404).json({ error: 'Notification not found or not owned by user.' });
+      if (error.code === 'PGRST116') {
+        return res.status(404).json({ error: 'Notification not found.' });
       }
-      console.error('Supabase mark notification read error:', error.message);
-      return res.status(500).json({ error: 'Failed to mark notification as read.' });
+      return res.status(500).json({ error: error.message });
     }
 
     res.status(200).json({
@@ -174,23 +140,19 @@ router.put('/notifications/:notificationId/read', authenticateToken, async (req,
     });
 
   } catch (error) {
-    console.error('Unexpected error marking notification as read:', error.message);
-    res.status(500).json({ error: 'Internal server error marking notification as read.' });
+    res.status(500).json({ error: error.message });
   }
 });
 
-// src/routes/userRoutes.js (Add this new route)
-
-/**
- * 3. PUT /users/onboard-provider - Mark user as a Service Provider
- * Screen: "Change account setup"
- */
+// =============================================================================
+// 5. ONBOARD PROVIDER
+// =============================================================================
 router.put('/onboard-provider', authenticateToken, async (req, res) => {
   const userId = req.user.id;
 
   try {
-    // 1. Update the is_service_provider flag in the profiles table
-    const { data, error } = await supabase
+    // Use supabaseAdmin to ensure we can write to the protected role/status fields
+    const { data, error } = await supabaseAdmin
       .from('profiles')
       .update({ is_service_provider: true })
       .eq('id', userId)
@@ -212,5 +174,78 @@ router.put('/onboard-provider', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Internal server error during provider onboarding.' });
   }
 });
+
+
+// GET /users/schedule/:providerId
+// Fetch the weekly schedule for a specific provider
+router.get('/schedule/:providerId', async (req, res) => {
+  const { providerId } = req.params;
+
+  try {
+    const { data, error } = await supabase
+      .from('provider_schedules')
+      .select('*')
+      .eq('provider_id', providerId)
+      .eq('is_active', true);
+
+    if (error) throw error;
+
+    res.status(200).json({ schedule: data });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /users/counts - Get unread counts for Badges
+router.get('/counts', authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+
+  try {
+    // 1. Count Unread Notifications
+    const { count: notifCount, error: notifError } = await supabase
+      .from('notifications')
+      .select('*', { count: 'exact', head: true }) // head: true means don't return data, just count
+      .eq('user_id', userId)
+      .eq('is_read', false);
+
+    if (notifError) throw notifError;
+
+    // 2. Count Unread Chat Messages
+    // (Messages where I am the receiver and is_read is false)
+    // We need to join with bookings to find where I am the receiver, 
+    // OR simpler: assume messages sent by others to my bookings are for me.
+    // The most robust way with your current schema:
+    
+    // Find bookings where I am involved
+    const { data: myBookings } = await supabase
+        .from('bookings')
+        .select('id')
+        .or(`client_id.eq.${userId},provider_id.eq.${userId}`);
+    
+    const bookingIds = myBookings.map(b => b.id);
+
+    let chatCount = 0;
+    if (bookingIds.length > 0) {
+        const { count, error: chatError } = await supabase
+            .from('messages')
+            .select('*', { count: 'exact', head: true })
+            .in('booking_id', bookingIds)
+            .neq('sender_id', userId) // Messages NOT sent by me
+            .eq('is_read', false);
+        
+        if (!chatError) chatCount = count;
+    }
+
+    res.status(200).json({
+      notifications: notifCount || 0,
+      chats: chatCount || 0
+    });
+
+  } catch (error) {
+    console.error('Counts Error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 
 module.exports = router;

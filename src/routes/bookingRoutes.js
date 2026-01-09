@@ -13,7 +13,7 @@ router.post('/', authenticateToken, async (req, res) => {
   const { service_id, scheduled_time, location_details, total_price } = req.body;
   const clientId = req.user.id;
 
-  if (!service_id || !scheduled_time || !total_price) {
+  if (!service_id || !scheduled_time || total_price === undefined) {
     return res.status(400).json({ error: 'Service ID, scheduled time, and price are required.' });
   }
 
@@ -75,14 +75,18 @@ router.post('/', authenticateToken, async (req, res) => {
     // ======================================================
     // 5. NOTIFY THE PROVIDER (The part you asked about!)
     // ======================================================
-    await supabaseAdmin.from('notifications').insert({
-      user_id: service.provider_id, // <--- Target: The Provider
-      title: 'New Booking Request 📅',
-      message: `Someone wants to book "${service.title}" for $${total_price}. Check your requests!`,
-      type: 'booking_request',
-      reference_id: booking.id,
-      is_read: false
-    });
+const isSkillSwap = parseFloat(total_price) === 0;
+
+await supabaseAdmin.from('notifications').insert({
+  user_id: service.provider_id,
+  title: isSkillSwap ? 'New Skill Swap Request 🔄' : 'New Booking Request 📅',
+  message: isSkillSwap 
+    ? `Someone wants to swap skills with you for "${service.title}". Check requests!` 
+    : `Someone wants to book "${service.title}" for $${total_price}.`,
+  type: 'booking_request', // This ensures it links to the Booking Screen
+  reference_id: booking.id,
+  is_read: false
+});
 
     res.status(201).json({ message: 'Booking request sent and funds held successfully.', booking });
 
@@ -174,6 +178,10 @@ router.put('/:id/status', authenticateToken, async (req, res) => {
  * 3. PUT /bookings/:id/complete - DUAL CONFIRMATION
  * Logic: Waits for BOTH parties to call this endpoint before releasing funds.
  */
+/**
+ * 3. PUT /bookings/:id/complete - DUAL CONFIRMATION
+ * Logic: Waits for BOTH parties to call this endpoint before releasing funds.
+ */
 router.put('/:id/complete', authenticateToken, async (req, res) => {
   const { id } = req.params;
   const userId = req.user.id;
@@ -204,37 +212,39 @@ router.put('/:id/complete', authenticateToken, async (req, res) => {
         // A. Mark Completed
         await supabaseAdmin.from('bookings').update({ status: 'completed' }).eq('id', id);
 
-        // B. Credit Provider
-        const { data: providerWallet } = await supabaseAdmin.from('wallets').select('*').eq('user_id', booking.provider_id).single();
-        const newBalance = parseFloat(providerWallet.balance) + parseFloat(booking.total_price);
-        await supabaseAdmin.from('wallets').update({ balance: newBalance }).eq('id', providerWallet.id);
+        // B. Credit Provider (Only if price > 0)
+        if (booking.total_price > 0) {
+            const { data: providerWallet } = await supabaseAdmin.from('wallets').select('*').eq('user_id', booking.provider_id).single();
+            // Assuming you have a wallet logic:
+            const newBalance = parseFloat(providerWallet.balance) + parseFloat(booking.total_price);
+            await supabaseAdmin.from('wallets').update({ balance: newBalance }).eq('id', providerWallet.id);
+            
+            // Log Transaction
+            await supabaseAdmin.from('transactions').insert({
+                wallet_id: providerWallet.id,
+                type: 'earning',
+                amount: booking.total_price,
+                status: 'success',
+                description: `Earning from Booking #${id}`
+            });
+        }
 
-        // C. Log Transaction
-        await supabaseAdmin.from('transactions').insert({
-            wallet_id: providerWallet.id,
-            type: 'earning',
-            amount: booking.total_price,
-            status: 'success',
-            description: `Earning from Booking #${id}`
-        });
-
-        // D. Notify Both
+        // C. Notify Both
         await supabaseAdmin.from('notifications').insert([
-            { user_id: booking.client_id, title: 'Service Completed', message: 'Booking closed.', type: 'booking_completed', reference_id: id },
-            { user_id: booking.provider_id, title: 'Payment Received', message: 'Funds released to your wallet.', type: 'booking_completed', reference_id: id }
+            { user_id: booking.client_id, title: 'Service Completed', message: 'Booking closed successfully.', type: 'booking_completed', reference_id: id },
+            { user_id: booking.provider_id, title: 'Job Completed', message: 'Funds/Swap recorded successfully.', type: 'booking_completed', reference_id: id }
         ]);
 
-        return res.json({ message: 'Booking fully completed. Funds released to provider.' });
+        return res.json({ message: 'Booking fully completed. Funds released.', status: 'completed' });
     }
 
-    res.json({ message: 'Confirmation recorded. Waiting for the other party to confirm.' });
+    res.json({ message: 'Confirmation recorded. Waiting for the other party.', status: 'waiting_other' });
 
   } catch (error) {
     console.error('Completion error:', error.message);
     res.status(500).json({ error: 'Internal server error.' });
   }
 });
-
 // --- STANDARD GETTERS ---
 
 router.get('/client', authenticateToken, async (req, res) => {
@@ -311,4 +321,24 @@ router.get('/bookings/all', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+router.get('/provider-schedule/:providerId', async (req, res) => {
+  const { providerId } = req.params;
+
+  try {
+    const { data: bookings, error } = await supabase
+      .from('bookings')
+      .select('scheduled_time, status')
+      .eq('provider_id', providerId)
+      .in('status', ['confirmed', 'pending']); // Block both confirmed and pending slots
+
+    if (error) throw error;
+
+    res.status(200).json({ bookings });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
 module.exports = router;

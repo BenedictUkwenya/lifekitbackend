@@ -4,6 +4,7 @@ const router = express.Router();
 // Import the Supabase client initialized in config/supabase.js
 const { supabase } = require('../config/supabase'); 
 
+const authenticateToken = require('../middleware/authMiddleware');
 // --- Authentication Endpoints ---
 
 /**
@@ -245,6 +246,21 @@ router.post('/verify-otp', async (req, res) => {
   } catch (error) {
     console.error('OTP Verification Error:', error.message);
     res.status(500).json({ error: 'Internal server error verifying OTP.' });
+  }
+});
+
+
+router.post('/logout', authenticateToken, async (req, res) => {
+  try {
+    const { error } = await supabase.auth.signOut();
+    
+    if (error) {
+      return res.status(500).json({ error: error.message });
+    }
+
+    res.status(200).json({ message: 'Logged out successfully' });
+  } catch (err) {
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 

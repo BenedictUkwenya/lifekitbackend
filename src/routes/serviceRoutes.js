@@ -108,15 +108,19 @@ router.post('/', authenticateToken, async (req, res) => {
  * 3. PUT /services/:id - Update a Service (Authenticated Provider)
  * Screen: "Edit Service"
  */
+/**
+ * 3. PUT /services/:id - Update a Service & Availability
+ */
 router.put('/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
     const providerId = req.user.id;
     
-    // Deconstruct all possible update fields, including new ones
+    // 1. Deconstruct fields
     const { 
         title, description, price, currency, 
         image_urls, location_text, latitude, longitude, 
-        category_id, status, service_type
+        category_id, status, service_type, pricing_type,
+        availability // <--- WE NEED TO CATCH THIS
     } = req.body;
 
     const updateData = {};
@@ -124,50 +128,75 @@ router.put('/:id', authenticateToken, async (req, res) => {
     if (description !== undefined) updateData.description = description;
     if (price !== undefined) updateData.price = price;
     if (currency !== undefined) updateData.currency = currency;
-    if (image_urls !== undefined) updateData.image_urls = image_urls; // Now expects an array of URLs
+    if (image_urls !== undefined) updateData.image_urls = image_urls;
     if (location_text !== undefined) updateData.location_text = location_text;
     if (latitude !== undefined) updateData.latitude = latitude;
     if (longitude !== undefined) updateData.longitude = longitude;
     if (category_id !== undefined) updateData.category_id = category_id;
     if (status !== undefined) updateData.status = status;
-    if (service_type !== undefined) updateData.service_type = service_type; // The new field
+    if (service_type !== undefined) updateData.service_type = service_type;
+    if (pricing_type !== undefined) updateData.pricing_type = pricing_type;
 
-    if (Object.keys(updateData).length === 0) {
-        return res.status(400).json({ message: 'No service data provided for update.' });
-    }
-       if (status === 'active' || status === 'pending') {
+    if (status === 'active' || status === 'pending') {
         updateData.status = 'pending'; 
     }
+
     try {
+        // 2. Update the Service Table
         const { data, error } = await supabase
             .from('services')
             .update(updateData)
             .eq('id', id)
-            .eq('provider_id', providerId) // Ensure user can only update their own services
+            .eq('provider_id', providerId)
             .select()
             .single();
 
-        if (error) {
-            if (error.code === 'PGRST116') { 
-                return res.status(404).json({ error: 'Service not found or not owned by user.' });
+        if (error) throw error;
+
+        // 3. Update Availability (Provider Schedules)
+        // If the frontend sent an availability array, we save it to the separate table
+        if (availability && Array.isArray(availability)) {
+            
+            // Loop through the days sent from Flutter
+            for (const daySlot of availability) {
+                // Check if this day already exists for this provider
+                const { data: existingDay } = await supabase
+                    .from('provider_schedules')
+                    .select('id')
+                    .eq('provider_id', providerId)
+                    .eq('day_of_week', daySlot.day)
+                    .single();
+
+                if (existingDay) {
+                    // Update existing row
+                    await supabase.from('provider_schedules').update({
+                        is_active: daySlot.active,
+                        start_time: daySlot.start,
+                        end_time: daySlot.end
+                    }).eq('id', existingDay.id);
+                } else {
+                    // Insert new row
+                    await supabase.from('provider_schedules').insert({
+                        provider_id: providerId,
+                        day_of_week: daySlot.day,
+                        is_active: daySlot.active,
+                        start_time: daySlot.start,
+                        end_time: daySlot.end
+                    });
+                }
             }
-            console.error('Supabase update service error:', error.message);
-            return res.status(400).json({ error: error.message });
         }
 
         res.status(200).json({
-            message: 'Service updated successfully!',
+            message: 'Service and schedule updated successfully!',
             service: data,
         });
 
     } catch (error) {
-        console.error('Unexpected error updating service:', error.message);
-        res.status(500).json({ error: 'Internal server error updating service.' });
+        console.error('Update error:', error.message);
+        res.status(500).json({ error: error.message });
     }
-});
-
-
-/**
+});/**
  * 4. DELETE /services/:id - Delete a Service (Authenticated Provider)
  * Screen: "Edit Service" or "Service Lists" menu
  */
@@ -213,7 +242,8 @@ router.get('/category/:categoryId', async (req, res) => {
     const { categoryId } = req.params;
 
     try {
-        // 1. Get all Sub-Category IDs for this Parent
+        // 1. Get Sub-Categories (Logic from both codes)
+        // We fetch any category where the parent is the one requested
         const { data: subCategories, error: subError } = await supabase
             .from('service_categories')
             .select('id')
@@ -222,21 +252,28 @@ router.get('/category/:categoryId', async (req, res) => {
         if (subError) throw subError;
 
         // 2. Build a list of IDs (The Parent + All its Children)
-        const allCategoryIds = subCategories.map(c => c.id);
+        const allCategoryIds = subCategories ? subCategories.map(c => c.id) : [];
         allCategoryIds.push(categoryId); 
 
-        // 3. Fetch Services belonging to ANY of these IDs
+        // 3. Get Services (Merged Logic)
+        // We use the list of IDs, BUT we also apply the "CRITICAL" fix 
+        // to filter out unknown providers.
         const { data: services, error } = await supabase
             .from('services')
-            .select('*, profiles:provider_id(full_name, profile_picture_url), service_categories(name)')
-            .in('category_id', allCategoryIds) // <--- The Magic Fix
+            .select(`
+                *, 
+                profiles!provider_id (
+                    full_name, 
+                    profile_picture_url
+                ), 
+                service_categories (name)
+            `)
+            .in('category_id', allCategoryIds) // Checks both parent and sub-categories
             .eq('status', 'active')
+            .not('profiles', 'is', null) // <--- CRITICAL: Filters out "Unknown Providers"
             .order('price', { ascending: true });
 
-        if (error) {
-            console.error('Supabase fetch by category error:', error.message);
-            return res.status(500).json({ error: 'Failed to fetch services.' });
-        }
+        if (error) throw error;
 
         res.status(200).json({
             message: 'Services fetched successfully!',
@@ -244,11 +281,10 @@ router.get('/category/:categoryId', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('Unexpected error:', error.message);
-        res.status(500).json({ error: 'Internal server error.' });
+        console.error('Service Fetch Error:', error.message);
+        res.status(500).json({ error: error.message });
     }
 });
-
 /**
  * 6. GET /services/provider/:providerId - List all services by a single provider (Public)
  * Screen: Provider's services list screen

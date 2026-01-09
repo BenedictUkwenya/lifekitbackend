@@ -16,6 +16,8 @@ const eventRoutes = require('./src/routes/eventRoutes');
 const feedRoutes = require('./src/routes/feedRoutes');
 const chatRoutes = require('./src/routes/chatRoutes'); 
 
+const reviewRoutes = require('./src/routes/reviewRoutes');
+// ...
 
 
 const app = express();
@@ -49,6 +51,7 @@ app.use('/admin', adminRoutes); // <--- Ensure Admin routes are registered
 app.use('/events', eventRoutes);
 app.use('/feeds', feedRoutes);
 app.use('/chats', chatRoutes); 
+app.use('/reviews', reviewRoutes);
 // Start the server
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
