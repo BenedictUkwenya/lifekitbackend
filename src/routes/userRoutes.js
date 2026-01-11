@@ -49,8 +49,6 @@ router.put('/profile', authenticateToken, async (req, res) => {
   const userId = req.user.id;
 
   try {
-    // 1. Prepare the data object
-    // IMPORTANT: We must include 'id' so upsert knows which row to look for
     const updateData = { id: userId };
 
     if (full_name !== undefined) updateData.full_name = full_name;
@@ -60,7 +58,22 @@ router.put('/profile', authenticateToken, async (req, res) => {
     if (bio !== undefined) updateData.bio = bio;
     if (job_title !== undefined) updateData.job_title = job_title;
 
-    // 2. Perform Upsert (Insert or Update) using Admin client
+    // --- THE FIX IS HERE ---
+    // If we are about to Insert (because profile might be missing), 
+    // and full_name is missing from this request, we MUST provide a fallback
+    // or fetch it from auth.users metadata.
+    
+    // 1. Check if we have the name in the request
+    if (!updateData.full_name) {
+        // 2. If not, fetch the user's email/metadata to fill the gap
+        const { data: userData } = await supabaseAdmin.auth.admin.getUserById(userId);
+        if (userData && userData.user) {
+            // Use metadata name, or email username, or just "User"
+            updateData.full_name = userData.user.user_metadata.full_name || "LifeKit User";
+        }
+    }
+    // -----------------------
+
     const { data, error } = await supabaseAdmin
       .from('profiles')
       .upsert(updateData)
@@ -68,21 +81,17 @@ router.put('/profile', authenticateToken, async (req, res) => {
       .single();
 
     if (error) {
-      console.error('Supabase profile update error:', error.message);
+      console.error('Profile update error:', error.message);
       return res.status(400).json({ error: error.message });
     }
 
-    res.status(200).json({
-      message: 'Profile updated successfully!',
-      profile: data,
-    });
+    res.status(200).json({ message: 'Success', profile: data });
 
   } catch (error) {
-    console.error('Unexpected profile update error:', error.message);
-    res.status(500).json({ error: 'Internal server error during profile update.' });
+    console.error('Server error:', error.message);
+    res.status(500).json({ error: error.message });
   }
-});
-// =============================================================================
+});// =============================================================================
 // 3. GET NOTIFICATIONS
 // =============================================================================
 router.get('/notifications', authenticateToken, async (req, res) => {

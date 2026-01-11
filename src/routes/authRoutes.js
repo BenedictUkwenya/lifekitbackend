@@ -12,23 +12,30 @@ const authenticateToken = require('../middleware/authMiddleware');
  * Handles user registration with Email and Password.
  * Supabase automatically sends a confirmation email (Magic Link).
  */
+/**
+ * 1. POST /auth/signup
+ * Handles user registration.
+ * FIX: Enforces full_name and creates profile row immediately to prevent DB errors.
+ */
 router.post('/signup', async (req, res) => {
   const { email, password, full_name } = req.body;
 
-  if (!email || !password) {
-    return res.status(400).json({ error: 'Email and password are required.' });
+  // 1. VALIDATION: Make full_name REQUIRED
+  if (!email || !password || !full_name) {
+    return res.status(400).json({ error: 'Email, password, and Full Name are required.' });
   }
 
   try {
-    // 1. Sign up the user (Supabase handles email confirmation email delivery)
+    // 2. Sign up the user in Auth system
     const { data, error } = await supabase.auth.signUp({
       email: email,
       password: password,
       options: {
+        // Save name in Auth Metadata (Backup)
         data: {
-          full_name: full_name || null, // Stored as user_metadata
+          full_name: full_name, 
         },
-        // IMPORTANT: The URL Supabase redirects to after the user clicks the link in their email
+        // Optional: Keep this if you use email links, otherwise OTP ignores it
         emailRedirectTo: 'http://localhost:3000/auth/confirm-email' 
       }
     });
@@ -38,8 +45,25 @@ router.post('/signup', async (req, res) => {
       return res.status(400).json({ error: error.message });
     }
 
+    // 3. CRITICAL FIX: Manually create the profile row immediately
+    // This inserts the row into 'public.profiles' with the required full_name.
+    if (data.user) {
+        const { error: profileError } = await supabaseAdmin
+            .from('profiles')
+            .upsert({
+                id: data.user.id,
+                email: email,
+                full_name: full_name // <--- This prevents the "not-null constraint" error
+            });
+            
+        if (profileError) {
+            // Log warning but don't fail, in case a Database Trigger already did it
+            console.warn("Manual profile creation warning (might be handled by trigger):", profileError.message);
+        }
+    }
+
     res.status(200).json({
-      message: 'Registration successful! Please check your email for a confirmation link to activate your account.',
+      message: 'Registration successful! Please verify your email.',
       user_id: data.user?.id,
       email: email,
     });
@@ -49,7 +73,6 @@ router.post('/signup', async (req, res) => {
     res.status(500).json({ error: 'Internal server error during signup.' });
   }
 });
-
 /**
  * 2. GET /auth/confirm-email
  * Target for Supabase's email confirmation link redirect.
