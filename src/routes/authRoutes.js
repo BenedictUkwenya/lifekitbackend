@@ -2,8 +2,7 @@
 const express = require('express');
 const router = express.Router();
 // Import the Supabase client initialized in config/supabase.js
-const { supabase } = require('../config/supabase'); 
-
+const { supabase, supabaseAdmin } = require('../config/supabase');
 const authenticateToken = require('../middleware/authMiddleware');
 // --- Authentication Endpoints ---
 
