@@ -41,28 +41,29 @@ router.get('/profile', authenticateToken, async (req, res) => {
 // 2. UPDATE PROFILE
 // Fix: Uses supabaseAdmin to bypass RLS and handles all fields including job_title
 // =============================================================================
+// =============================================================================
+// 2. UPDATE PROFILE (Fixed: Uses upsert to prevent "Cannot coerce" error)
+// =============================================================================
 router.put('/profile', authenticateToken, async (req, res) => {
   const { full_name, profile_picture_url, username, phone_number, bio, job_title } = req.body;
   const userId = req.user.id;
 
   try {
-    const updateData = {};
+    // 1. Prepare the data object
+    // IMPORTANT: We must include 'id' so upsert knows which row to look for
+    const updateData = { id: userId };
+
     if (full_name !== undefined) updateData.full_name = full_name;
     if (profile_picture_url !== undefined) updateData.profile_picture_url = profile_picture_url;
     if (username !== undefined) updateData.username = username;
     if (phone_number !== undefined) updateData.phone_number = phone_number;
     if (bio !== undefined) updateData.bio = bio;
-    if (job_title !== undefined) updateData.job_title = job_title; // Added this
+    if (job_title !== undefined) updateData.job_title = job_title;
 
-    if (Object.keys(updateData).length === 0) {
-      return res.status(400).json({ message: 'No profile data provided for update.' });
-    }
-
-    // CRITICAL FIX: Use supabaseAdmin
+    // 2. Perform Upsert (Insert or Update) using Admin client
     const { data, error } = await supabaseAdmin
       .from('profiles')
-      .update(updateData)
-      .eq('id', userId)
+      .upsert(updateData)
       .select()
       .single();
 
@@ -81,7 +82,6 @@ router.put('/profile', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Internal server error during profile update.' });
   }
 });
-
 // =============================================================================
 // 3. GET NOTIFICATIONS
 // =============================================================================
