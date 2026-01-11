@@ -44,13 +44,18 @@ router.get('/profile', authenticateToken, async (req, res) => {
 // =============================================================================
 // 2. UPDATE PROFILE (Fixed: Uses upsert to prevent "Cannot coerce" error)
 // =============================================================================
+
+// =============================================================================
+// 2. UPDATE PROFILE (Fixed: Ensures Email exists for Upsert)
+// =============================================================================
 router.put('/profile', authenticateToken, async (req, res) => {
   const { full_name, profile_picture_url, username, phone_number, bio, job_title } = req.body;
   const userId = req.user.id;
 
   try {
+    // 1. Prepare Data
     const updateData = { id: userId };
-
+    
     if (full_name !== undefined) updateData.full_name = full_name;
     if (profile_picture_url !== undefined) updateData.profile_picture_url = profile_picture_url;
     if (username !== undefined) updateData.username = username;
@@ -58,22 +63,22 @@ router.put('/profile', authenticateToken, async (req, res) => {
     if (bio !== undefined) updateData.bio = bio;
     if (job_title !== undefined) updateData.job_title = job_title;
 
-    // --- THE FIX IS HERE ---
-    // If we are about to Insert (because profile might be missing), 
-    // and full_name is missing from this request, we MUST provide a fallback
-    // or fetch it from auth.users metadata.
+    // 2. SAFETY NET: Fetch Email/Name if missing
+    // Since we are using upsert, we MUST have an email if a new row is created.
+    // We fetch it from the Auth system (supabaseAdmin) just in case.
+    const { data: userData, error: userError } = await supabaseAdmin.auth.admin.getUserById(userId);
     
-    // 1. Check if we have the name in the request
-    if (!updateData.full_name) {
-        // 2. If not, fetch the user's email/metadata to fill the gap
-        const { data: userData } = await supabaseAdmin.auth.admin.getUserById(userId);
-        if (userData && userData.user) {
-            // Use metadata name, or email username, or just "User"
+    if (userData && userData.user) {
+        // Ensure email is present
+        updateData.email = userData.user.email;
+        
+        // Ensure full_name is present (if not sent in body)
+        if (!updateData.full_name) {
             updateData.full_name = userData.user.user_metadata.full_name || "LifeKit User";
         }
     }
-    // -----------------------
 
+    // 3. Perform Upsert
     const { data, error } = await supabaseAdmin
       .from('profiles')
       .upsert(updateData)
@@ -81,17 +86,21 @@ router.put('/profile', authenticateToken, async (req, res) => {
       .single();
 
     if (error) {
-      console.error('Profile update error:', error.message);
+      console.error('Supabase profile update error:', error.message);
       return res.status(400).json({ error: error.message });
     }
 
-    res.status(200).json({ message: 'Success', profile: data });
+    res.status(200).json({
+      message: 'Profile updated successfully!',
+      profile: data,
+    });
 
   } catch (error) {
-    console.error('Server error:', error.message);
-    res.status(500).json({ error: error.message });
+    console.error('Unexpected profile update error:', error.message);
+    res.status(500).json({ error: 'Internal server error during profile update.' });
   }
-});// =============================================================================
+});
+
 // 3. GET NOTIFICATIONS
 // =============================================================================
 router.get('/notifications', authenticateToken, async (req, res) => {
