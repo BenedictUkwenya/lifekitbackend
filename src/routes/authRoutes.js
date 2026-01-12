@@ -16,26 +16,57 @@ const authenticateToken = require('../middleware/authMiddleware');
  * Handles user registration.
  * FIX: Enforces full_name and creates profile row immediately to prevent DB errors.
  */
+/**
+ * 1. POST /auth/signup
+ * Handles user registration.
+ * FEATURES:
+ * - Sanitizes email (removes spaces, lowercases)
+ * - Validates email format via Regex
+ * - Checks password length & matching
+ * - Creates Profile row immediately to prevent "null value" DB errors
+ */
 router.post('/signup', async (req, res) => {
-  const { email, password, full_name } = req.body;
+  // 1. Deconstruct inputs (Use 'let' for email so we can clean it)
+  let { email, password, confirm_password, full_name } = req.body;
 
-  // 1. VALIDATION: Make full_name REQUIRED
+  // --- SANITIZATION ---
+  if (email) {
+    email = email.trim().toLowerCase(); // Remove accidental spaces
+  }
+
+  // --- VALIDATION ---
+  
+  // A. Check Required Fields
   if (!email || !password || !full_name) {
     return res.status(400).json({ error: 'Email, password, and Full Name are required.' });
   }
 
+  // B. Check Email Format (Prevents "invalid format" errors from Supabase)
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) {
+    return res.status(400).json({ error: 'Invalid email address format.' });
+  }
+
+  // C. Check Password Length
+  if (password.length < 6) {
+    return res.status(400).json({ error: 'Password must be at least 6 characters long.' });
+  }
+
+  // D. Check Password Match (If frontend sends confirm_password)
+  if (confirm_password !== undefined && password !== confirm_password) {
+    return res.status(400).json({ error: 'Passwords do not match.' });
+  }
+
   try {
-    // 2. Sign up the user in Auth system
+    // --- SUPABASE AUTH ---
     const { data, error } = await supabase.auth.signUp({
       email: email,
       password: password,
       options: {
-        // Save name in Auth Metadata (Backup)
+        // Save name in Auth Metadata as a backup
         data: {
           full_name: full_name, 
         },
-        // Optional: Keep this if you use email links, otherwise OTP ignores it
-        emailRedirectTo: 'http://localhost:3000/auth/confirm-email' 
       }
     });
 
@@ -44,25 +75,28 @@ router.post('/signup', async (req, res) => {
       return res.status(400).json({ error: error.message });
     }
 
-    // 3. CRITICAL FIX: Manually create the profile row immediately
-    // This inserts the row into 'public.profiles' with the required full_name.
+    // --- PROFILE CREATION SAFETY NET ---
+    // Manually create the profile row immediately using Admin privileges.
+    // This ensures the row exists in 'public.profiles' with the required full_name
+    // before any subsequent calls try to update it.
     if (data.user) {
         const { error: profileError } = await supabaseAdmin
             .from('profiles')
             .upsert({
                 id: data.user.id,
                 email: email,
-                full_name: full_name // <--- This prevents the "not-null constraint" error
+                full_name: full_name // <--- This satisfies the Not-Null constraint
             });
             
         if (profileError) {
-            // Log warning but don't fail, in case a Database Trigger already did it
-            console.warn("Manual profile creation warning (might be handled by trigger):", profileError.message);
+            // We log a warning but don't fail the request, in case a Database Trigger 
+            // handled it faster than this code did.
+            console.warn("Manual profile creation warning:", profileError.message);
         }
     }
 
     res.status(200).json({
-      message: 'Registration successful! Please verify your email.',
+      message: 'Registration successful! Please check your email.',
       user_id: data.user?.id,
       email: email,
     });
@@ -71,8 +105,7 @@ router.post('/signup', async (req, res) => {
     console.error('Unexpected signup error:', error.message);
     res.status(500).json({ error: 'Internal server error during signup.' });
   }
-});
-/**
+});/**
  * 2. GET /auth/confirm-email
  * Target for Supabase's email confirmation link redirect.
  * This is a minimal backend endpoint. Frontend deep-linking would be more robust.
