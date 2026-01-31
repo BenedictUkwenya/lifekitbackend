@@ -41,14 +41,9 @@ router.get('/my-services', authenticateToken, async (req, res) => {
 
 
 /**
- * 2. POST /services - Bulk create new services from category selection (Authenticated)
- * Screen: After "Service Categories" selection
- * Body: { "category_ids": ["uuid1", "uuid2"], "currency": "USD" }
- */
-/**
- * 2. POST /services - Bulk create new services from category selection (Authenticated)
- * Screen: After "Service Categories" selection
- * UPDATED: Uses the Category Name as the default Service Title
+ * 2. POST /services - Create new service(s)
+ * LOGIC UPDATE: If Standalone (e.g. Plumbing), create ONE service with options.
+ * If Standard (e.g. Cleaning), create MULTIPLE services.
  */
 router.post('/', authenticateToken, async (req, res) => {
     const { category_ids, currency = 'USD' } = req.body; 
@@ -59,55 +54,90 @@ router.post('/', authenticateToken, async (req, res) => {
     }
 
     try {
-        // 1. Fetch the names of the selected categories
-        const { data: categories, error: catError } = await supabase
+        // 1. Fetch details of selected categories
+        const { data: selectedCats, error: catError } = await supabase
             .from('service_categories')
-            .select('id, name')
+            .select('id, name, is_standalone, parent_category_id')
             .in('id', category_ids);
 
-        if (catError) {
-            console.error('Error fetching category names:', catError.message);
-            return res.status(400).json({ error: 'Invalid categories selected.' });
+        if (catError) return res.status(400).json({ error: 'Invalid categories.' });
+
+        if (!selectedCats || selectedCats.length === 0) {
+             return res.status(400).json({ error: 'No valid categories found.' });
         }
 
-        // 2. Prepare the services using the actual Category Names
-        const servicesToInsert = categories.map(cat => ({
+        // 2. Check if these are sub-categories of a Standalone Parent
+        // We assume all selected IDs belong to the same parent flow for now
+        const firstCat = selectedCats[0];
+        
+        // Fetch Parent to check 'is_standalone' status
+        let parentCat = null;
+        if (firstCat.parent_category_id) {
+            const { data: parent } = await supabase
+                .from('service_categories')
+                .select('*')
+                .eq('id', firstCat.parent_category_id)
+                .single();
+            parentCat = parent;
+        }
+
+        // --- BRANCH A: STANDALONE SERVICE (e.g. Plumbing) ---
+        // If the parent is standalone, we create ONE service and put selected items in 'service_options'
+        if (parentCat && parentCat.is_standalone) {
+            
+            // Prepare options array: [{ name: 'Leak Repair', price: 0 }, ...]
+            const options = selectedCats.map(c => ({
+                id: c.id,
+                name: c.name,
+                price: 0 // Default price, provider edits this later
+            }));
+
+            const { data, error } = await supabase
+                .from('services')
+                .insert({
+                    provider_id: providerId,
+                    category_id: parentCat.id, // Link to Parent (Plumbing)
+                    title: `${parentCat.name} Services`,
+                    description: `Professional ${parentCat.name} services including ${options.map(o => o.name).join(', ')}.`,
+                    price: 0, // Base price 0, calculated from options later
+                    currency: currency,
+                    image_urls: [],
+                    service_type: 'Home Service (HS)', // Default for standalone
+                    status: 'draft',
+                    service_options: options // <--- SAVE OPTIONS HERE
+                })
+                .select();
+
+            if (error) throw error;
+            return res.status(201).json({ message: 'Standalone Service created!', services: data });
+        }
+
+        // --- BRANCH B: STANDARD SERVICES (e.g. Relocation) ---
+        // Old logic: Create one service per selected category
+        const servicesToInsert = selectedCats.map(cat => ({
             provider_id: providerId,
             category_id: cat.id, 
-            title: cat.name, // <--- USE CATEGORY NAME HERE (e.g., "Box Braids")
-            description: `Professional ${cat.name} services.`, // Better default description
+            title: cat.name,
+            description: `Professional ${cat.name} services.`,
             price: 0.00, 
             currency: currency,
             image_urls: [], 
             service_type: 'Default',
-            status: 'draft', // Start as draft
+            status: 'draft'
         }));
 
-        // 3. Bulk Insert
-        const { data, error } = await supabase
-            .from('services')
-            .insert(servicesToInsert)
-            .select(); 
+        const { data, error } = await supabase.from('services').insert(servicesToInsert).select(); 
+        if (error) throw error;
 
-        if (error) {
-            console.error('Supabase bulk create service error:', error.message);
-            return res.status(400).json({ error: error.message });
-        }
-
-        res.status(201).json({
-            message: 'Services created successfully!',
-            services: data,
-        });
+        res.status(201).json({ message: 'Services created successfully!', services: data });
 
     } catch (error) {
-        console.error('Unexpected bulk create service error:', error.message);
+        console.error('Create service error:', error.message);
         res.status(500).json({ error: 'Internal server error during service creation.' });
     }
 });
-/**
- * 3. PUT /services/:id - Update a Service (Authenticated Provider)
- * Screen: "Edit Service"
- */
+
+
 /**
  * 3. PUT /services/:id - Update a Service & Availability
  */
@@ -120,7 +150,8 @@ router.put('/:id', authenticateToken, async (req, res) => {
         title, description, price, currency, 
         image_urls, location_text, latitude, longitude, 
         category_id, status, service_type, pricing_type,
-        availability // <--- WE NEED TO CATCH THIS
+        service_options, // <--- Added for Standalone
+        availability 
     } = req.body;
 
     const updateData = {};
@@ -136,6 +167,9 @@ router.put('/:id', authenticateToken, async (req, res) => {
     if (status !== undefined) updateData.status = status;
     if (service_type !== undefined) updateData.service_type = service_type;
     if (pricing_type !== undefined) updateData.pricing_type = pricing_type;
+    
+    // Map service_options to updateData
+    if (service_options !== undefined) updateData.service_options = service_options; 
 
     if (status === 'active' || status === 'pending') {
         updateData.status = 'pending'; 
@@ -196,7 +230,9 @@ router.put('/:id', authenticateToken, async (req, res) => {
         console.error('Update error:', error.message);
         res.status(500).json({ error: error.message });
     }
-});/**
+});
+
+/**
  * 4. DELETE /services/:id - Delete a Service (Authenticated Provider)
  * Screen: "Edit Service" or "Service Lists" menu
  */
@@ -231,19 +267,14 @@ router.delete('/:id', authenticateToken, async (req, res) => {
 
 
 /**
- * 5. GET /services/category/:categoryId - List providers/services for a Category (Public)
- * Screen: "Hair & Beauty" provider list screen
- */
-/**
  * 5. GET /services/category/:categoryId 
- * Updated: Fetches services for a category OR any of its sub-categories.
+ * Fetches services for a category OR any of its sub-categories.
  */
 router.get('/category/:categoryId', async (req, res) => {
     const { categoryId } = req.params;
 
     try {
-        // 1. Get Sub-Categories (Logic from both codes)
-        // We fetch any category where the parent is the one requested
+        // 1. Get Sub-Categories
         const { data: subCategories, error: subError } = await supabase
             .from('service_categories')
             .select('id')
@@ -255,9 +286,7 @@ router.get('/category/:categoryId', async (req, res) => {
         const allCategoryIds = subCategories ? subCategories.map(c => c.id) : [];
         allCategoryIds.push(categoryId); 
 
-        // 3. Get Services (Merged Logic)
-        // We use the list of IDs, BUT we also apply the "CRITICAL" fix 
-        // to filter out unknown providers.
+        // 3. Get Services
         const { data: services, error } = await supabase
             .from('services')
             .select(`
@@ -268,9 +297,9 @@ router.get('/category/:categoryId', async (req, res) => {
                 ), 
                 service_categories (name)
             `)
-            .in('category_id', allCategoryIds) // Checks both parent and sub-categories
+            .in('category_id', allCategoryIds) 
             .eq('status', 'active')
-            .not('profiles', 'is', null) // <--- CRITICAL: Filters out "Unknown Providers"
+            .not('profiles', 'is', null)
             .order('price', { ascending: true });
 
         if (error) throw error;
@@ -285,6 +314,7 @@ router.get('/category/:categoryId', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+
 /**
  * 6. GET /services/provider/:providerId - List all services by a single provider (Public)
  * Screen: Provider's services list screen
@@ -336,9 +366,9 @@ router.get('/:id', async (req, res) => {
     try {
         const { data: service, error } = await supabase
             .from('services')
-            .select('*, profiles(full_name, profile_picture_url), service_categories(name)') // Join provider profile and category name
+            .select('*, profiles(full_name, profile_picture_url), service_categories(name)') 
             .eq('id', id)
-            .eq('status', 'active') // Only fetch active services
+            .eq('status', 'active') 
             .single();
 
         if (error) {
