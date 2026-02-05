@@ -106,7 +106,7 @@ router.post('/signup', async (req, res) => {
     res.status(500).json({ error: 'Internal server error during signup.' });
   }
 });/**
- * 2. GET /auth/confirm-email
+ * 2. GET a/auth/confirm-email
  * Target for Supabase's email confirmation link redirect.
  * This is a minimal backend endpoint. Frontend deep-linking would be more robust.
  */

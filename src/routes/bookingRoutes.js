@@ -10,7 +10,8 @@ const authenticateToken = require('../middleware/authMiddleware');
  * Logic: Check Balance -> Deduct Money (Hold) -> Create Booking -> Notify Provider
  */
 router.post('/', authenticateToken, async (req, res) => {
-  const { service_id, scheduled_time, location_details, total_price } = req.body;
+  // 1. Added service_type and comments to destructuring
+  const { service_id, scheduled_time, location_details, total_price, service_type, comments } = req.body;
   const clientId = req.user.id;
 
   if (!service_id || !scheduled_time || total_price === undefined) {
@@ -18,10 +19,10 @@ router.post('/', authenticateToken, async (req, res) => {
   }
 
   try {
-    // 1. Verify Service & Get Provider ID
-    const { data: service, error: serviceError } = await supabaseAdmin // Use Admin to be safe
+    // 2. Verify Service & Get Provider ID
+    const { data: service, error: serviceError } = await supabaseAdmin 
       .from('services')
-      .select('provider_id, price, title') // Get title for the notification
+      .select('provider_id, price, title') 
       .eq('id', service_id)
       .single();
 
@@ -29,7 +30,7 @@ router.post('/', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Service not found or not currently active.' });
     }
 
-    // 2. Check Client Wallet Balance
+    // 3. Check Client Wallet Balance
     const { data: clientWallet } = await supabaseAdmin
       .from('wallets')
       .select('*')
@@ -40,7 +41,7 @@ router.post('/', authenticateToken, async (req, res) => {
       return res.status(402).json({ error: 'Insufficient wallet balance. Please add money.' });
     }
 
-    // 3. DEDUCT MONEY (Hold Funds)
+    // 4. DEDUCT MONEY (Hold Funds)
     const newBalance = parseFloat(clientWallet.balance) - parseFloat(total_price);
     
     const { error: walletError } = await supabaseAdmin
@@ -50,7 +51,7 @@ router.post('/', authenticateToken, async (req, res) => {
 
     if (walletError) return res.status(500).json({ error: 'Payment processing failed.' });
 
-    // 4. Create Booking (Status: pending)
+    // 5. Create Booking (Including the new service_type and comments fields)
     const { data: booking, error: bookingError } = await supabaseAdmin
       .from('bookings')
       .insert({
@@ -60,6 +61,8 @@ router.post('/', authenticateToken, async (req, res) => {
         scheduled_time,
         location_details,
         total_price,
+        service_type, // <--- New field added
+        comments,     // <--- New field added
         status: 'pending',
         client_confirmed: false, 
         provider_confirmed: false 
@@ -68,25 +71,25 @@ router.post('/', authenticateToken, async (req, res) => {
       .single();
 
     if (bookingError) {
-      // Refund Logic (omitted for brevity, but same as before)
+      // Refund logic if booking fails
+      const refundBalance = parseFloat(clientWallet.balance); // total_price was already deducted
+      await supabaseAdmin.from('wallets').update({ balance: refundBalance }).eq('id', clientWallet.id);
       return res.status(500).json({ error: 'Failed to create booking.' });
     }
 
-    // ======================================================
-    // 5. NOTIFY THE PROVIDER (The part you asked about!)
-    // ======================================================
-const isSkillSwap = parseFloat(total_price) === 0;
+    // 6. NOTIFY THE PROVIDER
+    const isSkillSwap = parseFloat(total_price) === 0;
 
-await supabaseAdmin.from('notifications').insert({
-  user_id: service.provider_id,
-  title: isSkillSwap ? 'New Skill Swap Request 🔄' : 'New Booking Request 📅',
-  message: isSkillSwap 
-    ? `Someone wants to swap skills with you for "${service.title}". Check requests!` 
-    : `Someone wants to book "${service.title}" for $${total_price}.`,
-  type: 'booking_request', // This ensures it links to the Booking Screen
-  reference_id: booking.id,
-  is_read: false
-});
+    await supabaseAdmin.from('notifications').insert({
+      user_id: service.provider_id,
+      title: isSkillSwap ? 'New Skill Swap Request 🔄' : 'New Booking Request 📅',
+      message: isSkillSwap 
+        ? `Someone wants to swap skills with you for "${service.title}". Check requests!` 
+        : `Someone wants to book "${service.title}" for $${total_price}.`,
+      type: 'booking_request', 
+      reference_id: booking.id,
+      is_read: false
+    });
 
     res.status(201).json({ message: 'Booking request sent and funds held successfully.', booking });
 
@@ -95,9 +98,10 @@ await supabaseAdmin.from('notifications').insert({
     res.status(500).json({ error: 'Internal server error.' });
   }
 });
+
 /**
  * 2. PUT /bookings/:id/status - Provider Accepts or Rejects
- * NEW LOGIC: If Cancelled/Rejected -> REFUND THE CLIENT
+ * Logic: If Cancelled/Rejected -> REFUND THE CLIENT
  */
 router.put('/:id/status', authenticateToken, async (req, res) => {
   const { id } = req.params;
@@ -109,7 +113,6 @@ router.put('/:id/status', authenticateToken, async (req, res) => {
   }
 
   try {
-    // Fetch booking details first
     const { data: booking } = await supabaseAdmin
       .from('bookings')
       .select('*')
@@ -119,7 +122,6 @@ router.put('/:id/status', authenticateToken, async (req, res) => {
 
     if (!booking) return res.status(404).json({ error: 'Booking not found or unauthorized.' });
 
-    // Update Status
     const { data: updatedBooking, error } = await supabaseAdmin
       .from('bookings')
       .update({ status: status })
@@ -129,16 +131,11 @@ router.put('/:id/status', authenticateToken, async (req, res) => {
 
     if (error) return res.status(500).json({ error: 'Failed to update status.' });
 
-    // --- REFUND LOGIC IF CANCELLED ---
     if (status === 'cancelled') {
-        // 1. Get Client Wallet
         const { data: clientWallet } = await supabaseAdmin.from('wallets').select('*').eq('user_id', booking.client_id).single();
-        
-        // 2. Add Money Back
         const refundBalance = parseFloat(clientWallet.balance) + parseFloat(booking.total_price);
         await supabaseAdmin.from('wallets').update({ balance: refundBalance }).eq('id', clientWallet.id);
 
-        // 3. Log Transaction
         await supabaseAdmin.from('transactions').insert({
             wallet_id: clientWallet.id,
             type: 'refund',
@@ -147,7 +144,6 @@ router.put('/:id/status', authenticateToken, async (req, res) => {
             description: `Refund for Booking #${booking.id}`
         });
 
-        // 4. Notify Client
         await supabaseAdmin.from('notifications').insert({
             user_id: booking.client_id,
             title: 'Booking Declined',
@@ -156,7 +152,6 @@ router.put('/:id/status', authenticateToken, async (req, res) => {
             reference_id: id
         });
     } else {
-        // Notify Client of Confirmation
         await supabaseAdmin.from('notifications').insert({
             user_id: booking.client_id,
             title: 'Booking Confirmed!',
@@ -176,28 +171,20 @@ router.put('/:id/status', authenticateToken, async (req, res) => {
 
 /**
  * 3. PUT /bookings/:id/complete - DUAL CONFIRMATION
- * Logic: Waits for BOTH parties to call this endpoint before releasing funds.
- */
-/**
- * 3. PUT /bookings/:id/complete - DUAL CONFIRMATION
- * Logic: Waits for BOTH parties to call this endpoint before releasing funds.
  */
 router.put('/:id/complete', authenticateToken, async (req, res) => {
   const { id } = req.params;
   const userId = req.user.id;
 
   try {
-    // 1. Fetch booking
     const { data: booking } = await supabaseAdmin.from('bookings').select('*').eq('id', id).single();
     if (!booking) return res.status(404).json({ error: 'Booking not found.' });
 
-    // 2. Determine who is clicking
     let updateData = {};
     if (userId === booking.client_id) updateData = { client_confirmed: true };
     else if (userId === booking.provider_id) updateData = { provider_confirmed: true };
     else return res.status(403).json({ error: 'Unauthorized action.' });
 
-    // 3. Update the flag
     const { data: updatedBooking } = await supabaseAdmin
       .from('bookings')
       .update(updateData)
@@ -205,21 +192,14 @@ router.put('/:id/complete', authenticateToken, async (req, res) => {
       .select()
       .single();
 
-    // 4. CHECK: Are BOTH confirmed now?
     if (updatedBooking.client_confirmed && updatedBooking.provider_confirmed) {
-        // YES! RELEASE FUNDS TO PROVIDER
-        
-        // A. Mark Completed
         await supabaseAdmin.from('bookings').update({ status: 'completed' }).eq('id', id);
 
-        // B. Credit Provider (Only if price > 0)
         if (booking.total_price > 0) {
             const { data: providerWallet } = await supabaseAdmin.from('wallets').select('*').eq('user_id', booking.provider_id).single();
-            // Assuming you have a wallet logic:
             const newBalance = parseFloat(providerWallet.balance) + parseFloat(booking.total_price);
             await supabaseAdmin.from('wallets').update({ balance: newBalance }).eq('id', providerWallet.id);
             
-            // Log Transaction
             await supabaseAdmin.from('transactions').insert({
                 wallet_id: providerWallet.id,
                 type: 'earning',
@@ -229,7 +209,6 @@ router.put('/:id/complete', authenticateToken, async (req, res) => {
             });
         }
 
-        // C. Notify Both
         await supabaseAdmin.from('notifications').insert([
             { user_id: booking.client_id, title: 'Service Completed', message: 'Booking closed successfully.', type: 'booking_completed', reference_id: id },
             { user_id: booking.provider_id, title: 'Job Completed', message: 'Funds/Swap recorded successfully.', type: 'booking_completed', reference_id: id }
@@ -245,58 +224,46 @@ router.put('/:id/complete', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Internal server error.' });
   }
 });
-// --- STANDARD GETTERS ---
+
+/**
+ * Standard Getters
+ */
 
 router.get('/client', authenticateToken, async (req, res) => {
   const clientId = req.user.id;
-
   try {
-    // FIX: Used 'profiles!provider_id' instead of 'profiles:provider_id'
     const { data: bookings, error } = await supabaseAdmin 
       .from('bookings')
       .select('*, services(title, image_urls), profiles!provider_id(full_name)')
       .eq('client_id', clientId)
       .order('created_at', { ascending: false });
 
-    if (error) {
-        console.error("Supabase Error (Client):", error);
-        return res.status(400).json({ error: error.message });
-    }
-
+    if (error) return res.status(400).json({ error: error.message });
     res.status(200).json({ bookings });
-
   } catch (e) { 
     res.status(500).json({ error: e.message }); 
   }
-});// ... 
+});
+
 router.get('/provider', authenticateToken, async (req, res) => {
   const providerId = req.user.id;
-  
   try {
-    // FIX: Used 'profiles!client_id' instead of 'profiles:client_id'
     const { data: requests, error } = await supabaseAdmin 
       .from('bookings')
       .select('*, services(title), profiles!client_id(full_name, profile_picture_url)') 
       .eq('provider_id', providerId)
       .order('created_at', { ascending: false });
 
-    if (error) {
-        console.error("Supabase Error (Provider):", error);
-        return res.status(400).json({ error: error.message });
-    }
-    
+    if (error) return res.status(400).json({ error: error.message });
     res.status(200).json({ requests });
-
   } catch (e) { 
-    console.error(e);
     res.status(500).json({ error: e.message }); 
   }
 });
+
 router.get('/availability/:providerId', async (req, res) => {
-  // (Keep your existing availability logic here, it was correct)
   res.json({ message: "Availability endpoint placeholder" }); 
 });
-
 
 router.get('/bookings/all', async (req, res) => {
   try {
@@ -322,20 +289,43 @@ router.get('/bookings/all', async (req, res) => {
   }
 });
 
+// GET /bookings/provider-schedule/:providerId
 router.get('/provider-schedule/:providerId', async (req, res) => {
   const { providerId } = req.params;
-
   try {
-    const { data: bookings, error } = await supabase
+    const { data: bookings, error } = await supabaseAdmin
       .from('bookings')
-      .select('scheduled_time, status')
+      .select('scheduled_time, status, duration_hours, pricing_type')
       .eq('provider_id', providerId)
-      .in('status', ['confirmed', 'pending']); // Block both confirmed and pending slots
+      .in('status', ['confirmed', 'pending']); 
 
     if (error) throw error;
 
-    res.status(200).json({ bookings });
+    const blockedSlots = bookings.map(b => {
+      const start = new Date(b.scheduled_time);
+
+      if (b.pricing_type === 'hourly') {
+        // Block only the booked hours
+        const end = new Date(start);
+        end.setHours(end.getHours() + (b.duration_hours || 1));
+        return {
+          day: start.toISOString().split('T')[0],
+          start_time: start.toTimeString().slice(0, 5),
+          end_time: end.toTimeString().slice(0, 5),
+          blocked: false
+        };
+      } else {
+        // Fixed-price → block the entire day
+        return {
+          day: start.toISOString().split('T')[0],
+          blocked: true
+        };
+      }
+    });
+
+    res.status(200).json({ schedule: blockedSlots });
   } catch (error) {
+    console.error('Provider schedule error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });

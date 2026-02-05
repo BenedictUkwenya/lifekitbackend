@@ -268,25 +268,44 @@ router.delete('/:id', authenticateToken, async (req, res) => {
 
 /**
  * 5. GET /services/category/:categoryId 
- * Fetches services for a category OR any of its sub-categories.
+ * SMART UPDATE: Looks Upwards (Parent) and Downwards (Children) to find matches.
+ * Fixes "No providers found" when searching for a specific sub-skill (e.g. Leak Repair)
+ * that is contained inside a main service (e.g. Plumbing).
  */
 router.get('/category/:categoryId', async (req, res) => {
     const { categoryId } = req.params;
 
     try {
-        // 1. Get Sub-Categories
-        const { data: subCategories, error: subError } = await supabase
+        // 1. Get details of the requested category (Check if it has a parent)
+        const { data: currentCat, error: catError } = await supabase
+            .from('service_categories')
+            .select('id, parent_category_id')
+            .eq('id', categoryId)
+            .single();
+
+        if (catError) throw catError;
+
+        // 2. Get all Sub-Category IDs (Downwards)
+        const { data: subCategories } = await supabase
             .from('service_categories')
             .select('id')
             .eq('parent_category_id', categoryId);
 
-        if (subError) throw subError;
+        // 3. Build the Master List of IDs to search
+        const allCategoryIds = [categoryId]; // Start with requested ID
 
-        // 2. Build a list of IDs (The Parent + All its Children)
-        const allCategoryIds = subCategories ? subCategories.map(c => c.id) : [];
-        allCategoryIds.push(categoryId); 
+        // Add Children (if any)
+        if (subCategories && subCategories.length > 0) {
+            subCategories.forEach(sub => allCategoryIds.push(sub.id));
+        }
 
-        // 3. Get Services
+        // Add Parent (if any) - This is the Critical Fix!
+        // If I search "Leak Repair", I also want to find "Plumbing" services.
+        if (currentCat.parent_category_id) {
+            allCategoryIds.push(currentCat.parent_category_id);
+        }
+
+        // 4. Fetch Services
         const { data: services, error } = await supabase
             .from('services')
             .select(`
@@ -297,7 +316,7 @@ router.get('/category/:categoryId', async (req, res) => {
                 ), 
                 service_categories (name)
             `)
-            .in('category_id', allCategoryIds) 
+            .in('category_id', allCategoryIds) // Checks Child, Self, AND Parent
             .eq('status', 'active')
             .not('profiles', 'is', null)
             .order('price', { ascending: true });
