@@ -21,7 +21,6 @@ const reviewRoutes = require('./src/routes/reviewRoutes');
 
 
 const app = express();
-const PORT = process.env.PORT || 3000;
 
 // --- IMPORTANT: CORS CONFIGURATION ---
 // This allows your React App (on port 5173) to talk to this Backend
@@ -52,8 +51,19 @@ app.use('/events', eventRoutes);
 app.use('/feeds', feedRoutes);
 app.use('/chats', chatRoutes); 
 app.use('/reviews', reviewRoutes);
-// Start the server
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`Supabase URL: ${process.env.SUPABASE_URL}`);
-});
+
+
+// --- SERVER STARTUP (Modified for Vercel) ---
+
+// Only run app.listen if we are NOT in production (i.e. running locally)
+// Vercel handles the server start automatically via the exported 'app'
+if (process.env.NODE_ENV !== 'production') {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`Server running locally on port ${PORT}`);
+    console.log(`Supabase URL: ${process.env.SUPABASE_URL}`);
+  });
+}
+
+// Export the app for Vercel (Serverless function entry point)
+module.exports = app;
