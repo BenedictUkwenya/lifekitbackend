@@ -11,7 +11,6 @@ router.get('/', authenticateToken, async (req, res) => {
 
   try {
     // 1. Fetch all bookings involving the user
-    // We use explicit aliases (client:profiles!client_id) to avoid the "table specified more than once" error
     const { data: bookings, error } = await supabase
       .from('bookings')
       .select(`
@@ -25,8 +24,7 @@ router.get('/', authenticateToken, async (req, res) => {
 
     if (error) throw error;
 
-    // 2. GROUPING LOGIC (This was missing!)
-    // We group bookings by the "Other User" to create a conversation list.
+    // 2. GROUPING LOGIC
     const conversationsMap = new Map();
 
     bookings.forEach(booking => {
@@ -89,26 +87,32 @@ router.get('/:bookingId', authenticateToken, async (req, res) => {
 });
 
 // =============================================================================
-// 3. POST /chats/message - Send Message & Notify
+// 3. POST /chats/message - Send Message & Notify (With Status Check)
 // =============================================================================
 router.post('/message', authenticateToken, async (req, res) => {
   const { booking_id, content } = req.body;
   const senderId = req.user.id;
 
   try {
-    // A. Fetch Booking to identify Receiver
+    // 1. Fetch Booking Status & Details
     const { data: booking, error: bookingError } = await supabase
       .from('bookings')
-      .select('client_id, provider_id, services(title)')
+      .select('status, client_id, provider_id, services(title)')
       .eq('id', booking_id)
       .single();
 
     if (bookingError || !booking) return res.status(404).json({ error: "Booking not found" });
 
-    // B. Determine Receiver
+    // 2. SECURITY CHECK: Is the booking active?
+    // Prevent messaging if the service is already finished or cancelled
+    if (booking.status === 'completed' || booking.status === 'cancelled') {
+      return res.status(403).json({ error: "This conversation is closed because the service is finished." });
+    }
+
+    // 3. Determine Receiver
     const receiverId = (senderId === booking.client_id) ? booking.provider_id : booking.client_id;
 
-    // C. Insert Message
+    // 4. Insert Message
     const { error: msgError } = await supabase
       .from('messages')
       .insert({
@@ -120,7 +124,8 @@ router.post('/message', authenticateToken, async (req, res) => {
 
     if (msgError) throw msgError;
 
-    // D. TRIGGER NOTIFICATION
+    // 5. Notify Receiver
+    // We use supabaseAdmin to ensure we have permission to write to notifications
     await supabaseAdmin.from('notifications').insert({
       user_id: receiverId,
       title: 'New Message 💬',
@@ -130,7 +135,7 @@ router.post('/message', authenticateToken, async (req, res) => {
       is_read: false
     });
 
-    // E. Update Booking timestamp to bump to top
+    // 6. Update Booking Timestamp (to bubble conversation to top)
     await supabaseAdmin.from('bookings').update({ updated_at: new Date() }).eq('id', booking_id);
 
     res.status(201).json({ message: "Sent" });

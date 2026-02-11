@@ -265,5 +265,103 @@ router.get('/counts', authenticateToken, async (req, res) => {
   }
 });
 
+// PUT /users/notifications/read-all - Mark ALL as read
+router.put('/notifications/read-all', authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  try {
+    const { error } = await supabase
+      .from('notifications')
+      .update({ is_read: true })
+      .eq('user_id', userId)
+      .eq('is_read', false); // Only update unread ones
+
+    if (error) throw error;
+    res.status(200).json({ message: 'All marked as read' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// DELETE /users/notifications/:id - Delete a notification
+router.delete('/notifications/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const userId = req.user.id;
+
+  try {
+    const { error } = await supabase
+      .from('notifications')
+      .delete()
+      .eq('id', id)
+      .eq('user_id', userId); // Security check
+
+    if (error) throw error;
+    res.status(200).json({ message: 'Deleted' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+// GET /users/provider-stats - Dashboard Analytics
+router.get('/provider-stats', authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+
+  try {
+    // 1. Get All Completed Bookings
+    const { data: bookings, error } = await supabase
+      .from('bookings')
+      .select('total_price, created_at')
+      .eq('provider_id', userId)
+      .eq('status', 'completed');
+
+    if (error) throw error;
+
+    // 2. Calculate Totals
+    let totalEarnings = 0;
+    let completedJobs = bookings.length;
+    
+    // 3. Prepare Chart Data (Last 7 Days)
+    const chartData = Array(7).fill(0); // [0, 0, 0, 0, 0, 0, 0]
+    const today = new Date();
+    
+    bookings.forEach(b => {
+      totalEarnings += parseFloat(b.total_price);
+
+      // Check if booking was in the last 7 days
+      const bookingDate = new Date(b.created_at);
+      const diffTime = Math.abs(today - bookingDate);
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)); 
+
+      if (diffDays <= 7) {
+        // Map to array index (7 days ago = index 0, Today = index 6)
+        const index = 7 - diffDays; 
+        if (index >= 0) chartData[index] += parseFloat(b.total_price);
+      }
+    });
+
+    // 4. Get Review Stats
+    const { data: reviews } = await supabase
+      .from('reviews')
+      .select('rating')
+      .eq('provider_id', userId);
+      
+    const reviewCount = reviews.length;
+    const avgRating = reviewCount > 0 
+        ? (reviews.reduce((a, b) => a + b.rating, 0) / reviewCount).toFixed(1) 
+        : "0.0";
+
+    res.json({
+      totalEarnings,
+      completedJobs,
+      avgRating,
+      reviewCount,
+      chartData // e.g., [50, 0, 120, 30, 0, 200, 0]
+    });
+
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 
 module.exports = router;
