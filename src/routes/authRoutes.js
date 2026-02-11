@@ -25,13 +25,17 @@ const authenticateToken = require('../middleware/authMiddleware');
  * - Checks password length & matching
  * - Creates Profile row immediately to prevent "null value" DB errors
  */
+/**
+ * POST /auth/signup
+ * Handles user registration with a pre-signup duplicate email check.
+ */
 router.post('/signup', async (req, res) => {
-  // 1. Deconstruct inputs (Use 'let' for email so we can clean it)
+  // 1. Deconstruct inputs
   let { email, password, confirm_password, full_name } = req.body;
 
   // --- SANITIZATION ---
   if (email) {
-    email = email.trim().toLowerCase(); // Remove accidental spaces
+    email = email.trim().toLowerCase(); // Remove accidental spaces and normalize case
   }
 
   // --- VALIDATION ---
@@ -41,7 +45,7 @@ router.post('/signup', async (req, res) => {
     return res.status(400).json({ error: 'Email, password, and Full Name are required.' });
   }
 
-  // B. Check Email Format (Prevents "invalid format" errors from Supabase)
+  // B. Check Email Format
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   if (!emailRegex.test(email)) {
     return res.status(400).json({ error: 'Invalid email address format.' });
@@ -52,13 +56,30 @@ router.post('/signup', async (req, res) => {
     return res.status(400).json({ error: 'Password must be at least 6 characters long.' });
   }
 
-  // D. Check Password Match (If frontend sends confirm_password)
+  // D. Check Password Match
   if (confirm_password !== undefined && password !== confirm_password) {
     return res.status(400).json({ error: 'Passwords do not match.' });
   }
 
   try {
-    // --- SUPABASE AUTH ---
+    // --- STEP 1: CHECK DUPLICATE EMAIL (PRE-SIGNUP) ---
+    // We use listUsers to search for this email. 
+    // Note: listUsers is an Admin function, so we use supabaseAdmin.
+    const { data: existingUsers, error: checkError } = await supabaseAdmin.auth.admin.listUsers();
+    
+    if (checkError) {
+      console.error('Error checking existing users:', checkError.message);
+      throw checkError;
+    }
+
+    // Filter the list to find a match
+    const userExists = existingUsers.users.some(u => u.email === email);
+
+    if (userExists) {
+        return res.status(409).json({ error: 'Email is already registered. Please login.' });
+    }
+
+    // --- STEP 2: SUPABASE AUTH SIGNUP ---
     const { data, error } = await supabase.auth.signUp({
       email: email,
       password: password,
@@ -75,28 +96,26 @@ router.post('/signup', async (req, res) => {
       return res.status(400).json({ error: error.message });
     }
 
-    // --- PROFILE CREATION SAFETY NET ---
-    // Manually create the profile row immediately using Admin privileges.
-    // This ensures the row exists in 'public.profiles' with the required full_name
-    // before any subsequent calls try to update it.
+    // --- STEP 3: PROFILE CREATION SAFETY NET ---
+    // Manually create/update the profile row immediately using Admin privileges.
+    // This ensures the row exists in 'public.profiles' with the required full_name.
     if (data.user) {
         const { error: profileError } = await supabaseAdmin
             .from('profiles')
             .upsert({
                 id: data.user.id,
                 email: email,
-                full_name: full_name // <--- This satisfies the Not-Null constraint
+                full_name: full_name // Satisfies Not-Null constraints in the DB
             });
             
         if (profileError) {
-            // We log a warning but don't fail the request, in case a Database Trigger 
-            // handled it faster than this code did.
+            // Log a warning but don't fail the request (Database Trigger might have already handled it)
             console.warn("Manual profile creation warning:", profileError.message);
         }
     }
 
     res.status(200).json({
-      message: 'Registration successful! Please check your email.',
+      message: 'Registration successful! Please check your email for confirmation.',
       user_id: data.user?.id,
       email: email,
     });
@@ -319,4 +338,87 @@ router.post('/logout', authenticateToken, async (req, res) => {
   }
 });
 
+/**
+ * 8. POST /auth/refresh-token
+ * Uses the long-lived refresh_token to get a new access_token
+ */
+router.post('/refresh-token', async (req, res) => {
+  const { refresh_token } = req.body;
+
+  if (!refresh_token) {
+    return res.status(400).json({ error: 'Refresh token is required' });
+  }
+
+  try {
+    const { data, error } = await supabase.auth.refreshSession({ 
+      refresh_token 
+    });
+
+    if (error) {
+      // If refresh fails (e.g. user revoked, or refresh token expired), return 403
+      return res.status(403).json({ error: 'Session expired. Please login again.' });
+    }
+
+    // Return the new pair of tokens
+    res.status(200).json({
+      access_token: data.session.access_token,
+      refresh_token: data.session.refresh_token,
+    });
+
+  } catch (error) {
+    console.error("Refresh Error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * 9. PUT /auth/update-password
+ * SECURE VERSION: Verifies old password before updating to new one.
+ */
+router.put('/update-password', authenticateToken, async (req, res) => {
+  const { current_password, new_password } = req.body;
+  const userId = req.user.id;
+
+  if (!current_password || !new_password || new_password.length < 6) {
+    return res.status(400).json({ error: 'Current password and a valid new password (min 6 chars) are required.' });
+  }
+
+  try {
+    // 1. Get user's email from the profiles table
+    const { data: profile, error: profileError } = await supabase
+      .from('profiles')
+      .select('email')
+      .eq('id', userId)
+      .single();
+
+    if (profileError || !profile) return res.status(404).json({ error: "User profile not found." });
+
+    // 2. VERIFY CURRENT PASSWORD
+    // We attempt to sign in with the current credentials to prove the user knows the old password
+    const { error: verifyError } = await supabase.auth.signInWithPassword({
+      email: profile.email,
+      password: current_password,
+    });
+
+    if (verifyError) {
+      return res.status(401).json({ error: 'Current password incorrect. Verification failed.' });
+    }
+
+    // 3. PROCEED WITH UPDATE using Admin Client
+    const { error: updateError } = await supabaseAdmin.auth.admin.updateUserById(
+      userId,
+      { password: new_password }
+    );
+
+    if (updateError) {
+      return res.status(400).json({ error: updateError.message });
+    }
+
+    res.status(200).json({ message: 'Password updated successfully!' });
+
+  } catch (error) {
+    console.error('Password Update Error:', error.message);
+    res.status(500).json({ error: 'Internal server error.' });
+  }
+});
 module.exports = router;
