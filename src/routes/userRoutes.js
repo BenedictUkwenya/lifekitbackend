@@ -235,10 +235,12 @@ router.get('/counts', authenticateToken, async (req, res) => {
     // The most robust way with your current schema:
     
     // Find bookings where I am involved
+    // Find bookings where I am involved AND the chat is NOT locked
     const { data: myBookings } = await supabase
         .from('bookings')
         .select('id')
-        .or(`client_id.eq.${userId},provider_id.eq.${userId}`);
+        .or(`client_id.eq.${userId},provider_id.eq.${userId}`)
+        .not('status', 'in', '("completed","cancelled")'); // <--- THIS FIXES IT
     
     const bookingIds = myBookings.map(b => b.id);
 

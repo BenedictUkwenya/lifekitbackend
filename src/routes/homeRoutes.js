@@ -28,17 +28,33 @@ router.get('/offers', async (req, res) => {
 });
 
 // 2. Get Popular Services (Public)
+// 2. Get Popular Services (Public & Dynamic)
 router.get('/popular-services', async (req, res) => {
   try {
-    const { data: services, error } = await supabase
+    // 1. Try to fetch the top 5 highest-rated active services
+    let { data: services, error } = await supabase
       .from('services')
       .select('*, profiles(full_name, profile_picture_url), service_categories(name)')
-      .eq('is_popular', true)
       .eq('status', 'active')
-      .order('created_at', { ascending: false })
-      .limit(5);
+      // Removed the hardcoded .eq('is_popular', true)
+      .order('average_rating', { ascending: false, nullsFirst: false })
+      .order('total_reviews', { ascending: false })
+      .limit(6);
 
     if (error) throw error;
+
+    // 2. Fallback for new apps: 
+    // If no services have ratings yet (or list is empty), just fetch the newest active ones!
+    if (!services || services.length === 0 || services[0].average_rating === 0) {
+      const { data: newestServices } = await supabase
+        .from('services')
+        .select('*, profiles(full_name, profile_picture_url), service_categories(name)')
+        .eq('status', 'active')
+        .order('created_at', { ascending: false })
+        .limit(6);
+        
+      services = newestServices || [];
+    }
 
     res.status(200).json({
       message: 'Popular services fetched successfully!',
@@ -49,7 +65,6 @@ router.get('/popular-services', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
 // 3. Get ROOT Service Categories (Main Page)
 // This only returns categories that DO NOT have a parent.
 router.get('/categories', async (req, res) => {
