@@ -3,16 +3,31 @@ const router = express.Router();
 const { supabase, supabaseAdmin } = require('../config/supabase');
 const authenticateAdmin = require('../middleware/adminMiddleware');
 
-// 1. GET /feeds/posts (Public - For Mobile App)
-router.get('/posts', async (req, res) => {
+// 1. GET /feeds/posts (Auth - includes like meta for current user)
+router.get('/posts', require('../middleware/authMiddleware'), async (req, res) => {
+  const userId = req.user.id;
   try {
     const { data, error } = await supabase
       .from('posts')
-      .select('*, profiles(full_name, username, profile_picture_url)')
+      .select(
+        `
+        *,
+        profiles(full_name, username, profile_picture_url),
+        post_likes (user_id)
+      `,
+      )
       .order('created_at', { ascending: false });
 
     if (error) throw error;
-    res.json(data);
+
+    const formatted = (data || []).map((p) => ({
+      ...p,
+      is_liked_by_me: Array.isArray(p.post_likes)
+        ? p.post_likes.some((l) => l.user_id === userId)
+        : false,
+    }));
+
+    res.json(formatted);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -123,37 +138,44 @@ router.post('/posts/:id/like', authenticateToken, async (req, res) => {
   const userId = req.user.id;
 
   try {
-    // Check if already liked
     const { data: existingLike } = await supabase
       .from('post_likes')
-      .select('*')
+      .select('id')
       .eq('post_id', id)
       .eq('user_id', userId)
-      .single();
+      .maybeSingle();
 
-    let action = '';
+    let isLiked;
 
     if (existingLike) {
-      // UNLIKE: Remove row
       await supabase.from('post_likes').delete().eq('id', existingLike.id);
-      // Decrement count in posts table
-      await supabase.rpc('decrement_likes', { row_id: id }); 
-      action = 'unliked';
+      isLiked = false;
     } else {
-      // LIKE: Insert row
       await supabase.from('post_likes').insert({ post_id: id, user_id: userId });
-      // Increment count in posts table
-      await supabase.rpc('increment_likes', { row_id: id });
-      action = 'liked';
+      isLiked = true;
     }
 
-    res.json({ message: `Post ${action}` });
+    const { data: likesData, error: likesError } = await supabase
+      .from('post_likes')
+      .select('id')
+      .eq('post_id', id);
 
+    if (likesError) throw likesError;
+
+    const likesCount = Array.isArray(likesData) ? likesData.length : 0;
+
+    await supabaseAdmin
+      .from('posts')
+      .update({ likes_count: likesCount })
+      .eq('id', id);
+
+    res.json({
+      message: 'Post like toggled',
+      is_liked_by_me: isLiked,
+      likes_count: likesCount,
+    });
   } catch (error) {
-    // Fallback: If RPC fails (count logic), just return success for the toggle
-    // You might need to create the RPC functions in SQL, or handle counts manually
-    // For simplicity, we will assume manual count update if RPC is missing
-    res.json({ message: 'Like toggled' }); 
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -257,6 +279,76 @@ router.post('/posts/:id/comments', authenticateToken, async (req, res) => {
     }
 
     res.status(201).json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 8. POST /feeds/toggle-bookmark - Toggle Saved Post (Auth Required)
+router.post('/toggle-bookmark', authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  const { postId } = req.body;
+
+  if (!postId) {
+    return res.status(400).json({ error: 'postId is required' });
+  }
+
+  try {
+    const { data: existing } = await supabase
+      .from('saved_posts')
+      .select('id')
+      .eq('post_id', postId)
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    let isSaved;
+
+    if (existing) {
+      await supabase.from('saved_posts').delete().eq('id', existing.id);
+      isSaved = false;
+    } else {
+      await supabase.from('saved_posts').insert({
+        post_id: postId,
+        user_id: userId,
+      });
+      isSaved = true;
+    }
+
+    res.json({ is_saved: isSaved });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 9. GET /feeds/saved-posts - Get Saved Posts for Current User (Auth Required)
+router.get('/saved-posts', authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+
+  try {
+    const { data, error } = await supabase
+      .from('saved_posts')
+      .select(
+        `
+        id,
+        created_at,
+        posts (
+          *,
+          profiles (full_name, username, profile_picture_url)
+        )
+      `,
+      )
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+
+    const posts = Array.isArray(data)
+      ? data
+          .map((row) => row.posts)
+          .filter((p) => !!p)
+      : [];
+
+    res.json(posts);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
