@@ -34,17 +34,54 @@ router.get('/events', async (req, res) => {
   }
 });
 
+// 2b. GET /feeds/events/:id/meta  (likes + comments summary for one event)
+router.get('/events/:id/meta', require('../middleware/authMiddleware'), async (req, res) => {
+  const eventId = req.params.id;
+  const userId = req.user.id;
+  try {
+    // Fetch all likes for this event to compute count + "liked by me"
+    const { data: likesData, error: likesError } = await supabase
+      .from('event_likes')
+      .select('user_id')
+      .eq('event_id', eventId);
+    if (likesError) throw likesError;
+
+    const likesCount = Array.isArray(likesData) ? likesData.length : 0;
+    const isLikedByMe = Array.isArray(likesData)
+      ? likesData.some(l => l.user_id === userId)
+      : false;
+
+    // Fetch comments just for count
+    const { data: commentsData, error: commentsError } = await supabase
+      .from('event_comments')
+      .select('id')
+      .eq('event_id', eventId);
+    if (commentsError) throw commentsError;
+
+    const commentsCount = Array.isArray(commentsData) ? commentsData.length : 0;
+
+    res.json({
+      likes_count: likesCount,
+      comments_count: commentsCount,
+      is_liked_by_me: isLikedByMe
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // --- ADMIN ACTIONS ---
 
 // 3. POST /feeds/posts (Admin - Create Post)
 router.post('/posts', authenticateAdmin, async (req, res) => {
-  const { content, image_url } = req.body;
+  const { title, content, image_url } = req.body;
   const userId = req.user.id; // The Admin's ID
 
   try {
     const { data, error } = await supabaseAdmin
       .from('posts')
       .insert({
+        title: title || null,
         content,
         image_url,
         user_id: userId,
@@ -120,6 +157,43 @@ router.post('/posts/:id/like', authenticateToken, async (req, res) => {
   }
 });
 
+// 5b. POST /feeds/events/:id/like - Toggle Event Like (Auth Required)
+router.post('/events/:id/like', authenticateToken, async (req, res) => {
+  const { id } = req.params; // Event ID
+  const userId = req.user.id;
+
+  try {
+    const { data: existingLike } = await supabase
+      .from('event_likes')
+      .select('*')
+      .eq('event_id', id)
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    let isLiked;
+
+    if (existingLike) {
+      await supabase.from('event_likes').delete().eq('id', existingLike.id);
+      isLiked = false;
+    } else {
+      await supabase.from('event_likes').insert({ event_id: id, user_id: userId });
+      isLiked = true;
+    }
+
+    // Return fresh meta so client can sync counts optimistically if desired
+    const { data: likesData } = await supabase
+      .from('event_likes')
+      .select('id')
+      .eq('event_id', id);
+
+    const likesCount = Array.isArray(likesData) ? likesData.length : 0;
+
+    res.json({ message: 'Event like toggled', is_liked_by_me: isLiked, likes_count: likesCount });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // 6. GET /feeds/posts/:id/comments - Get Comments
 router.get('/posts/:id/comments', async (req, res) => {
   const { id } = req.params;
@@ -152,10 +226,97 @@ router.post('/posts/:id/comments', authenticateToken, async (req, res) => {
 
     if (error) throw error;
 
-    // Increment comment count on post
-    // Note: Ideally use RPC or a trigger, but simple update works for low scale
-    const { data: post } = await supabase.from('posts').select('comments_count').eq('id', id).single();
-    await supabaseAdmin.from('posts').update({ comments_count: (post.comments_count || 0) + 1 }).eq('id', id);
+    const { data: post } = await supabase
+      .from('posts')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (post) {
+      const commentsCount = (post.comments_count || 0) + 1;
+      await supabaseAdmin
+        .from('posts')
+        .update({ comments_count: commentsCount })
+        .eq('id', id);
+
+      const ownerId = post.user_id;
+      const commenterName =
+        data.profiles?.full_name || 'Someone';
+
+      if (ownerId && ownerId !== userId) {
+        const preview = content.length > 80 ? content.substring(0, 77) + '...' : content;
+        await supabaseAdmin.from('notifications').insert({
+          user_id: ownerId,
+          title: 'New Comment on Your Post 💬',
+          message: `${commenterName} commented: "${preview}"`,
+          type: 'post_comment',
+          reference_id: id,
+          is_read: false
+        });
+      }
+    }
+
+    res.status(201).json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 7b. GET /feeds/events/:id/comments - Get Event Comments
+router.get('/events/:id/comments', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { data, error } = await supabase
+      .from('event_comments')
+      .select('*, profiles(full_name, profile_picture_url)')
+      .eq('event_id', id)
+      .order('created_at', { ascending: true });
+
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 7c. POST /feeds/events/:id/comments - Add Event Comment (Auth Required)
+router.post('/events/:id/comments', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { content } = req.body;
+  const userId = req.user.id;
+
+  try {
+    const { data, error } = await supabase
+      .from('event_comments')
+      .insert({ event_id: id, user_id: userId, content })
+      .select('*, profiles(full_name, profile_picture_url)')
+      .single();
+
+    if (error) throw error;
+
+    const { data: event } = await supabase
+      .from('events')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (event) {
+      const ownerId = event.user_id || event.creator_id;
+      const commenterName =
+        data.profiles?.full_name || 'Someone';
+
+      if (ownerId && ownerId !== userId) {
+        const preview = content.length > 80 ? content.substring(0, 77) + '...' : content;
+        await supabaseAdmin.from('notifications').insert({
+          user_id: ownerId,
+          title: 'New Comment on Your Event 💬',
+          message: `${commenterName} commented on "${event.title}": "${preview}"`,
+          type: 'event_comment',
+          reference_id: id,
+          is_read: false
+        });
+      }
+    }
 
     res.status(201).json(data);
   } catch (error) {
@@ -427,17 +588,50 @@ router.post('/groups/posts/:postId/comments', authenticateToken, async (req, res
   if (!isContentSafe(content)) return res.status(400).json({ error: "Restricted content." });
 
   try {
-    const { data, error } = await supabase.from('group_comments').insert({
-      post_id: req.params.postId,
-      user_id: req.user.id,
-      content
-    }).select('*, profiles(full_name, profile_picture_url)').single();
+    const userId = req.user.id;
+    const postId = req.params.postId;
+
+    const { data, error } = await supabase
+      .from('group_comments')
+      .insert({
+        post_id: postId,
+        user_id: userId,
+        content
+      })
+      .select('*, profiles(full_name, profile_picture_url)')
+      .single();
 
     if (error) throw error;
-    // Increment count
-    await supabaseAdmin.from('group_posts').select('comments_count').eq('id', req.params.postId).then(({data}) => {
-       supabaseAdmin.from('group_posts').update({ comments_count: (data[0].comments_count || 0) + 1 }).eq('id', req.params.postId);
-    });
+
+    const { data: post } = await supabaseAdmin
+      .from('group_posts')
+      .select('user_id, comments_count, content')
+      .eq('id', postId)
+      .single();
+
+    if (post) {
+      const commentsCount = (post.comments_count || 0) + 1;
+      await supabaseAdmin
+        .from('group_posts')
+        .update({ comments_count: commentsCount })
+        .eq('id', postId);
+
+      const ownerId = post.user_id;
+      const commenterName =
+        data.profiles?.full_name || 'Someone';
+
+      if (ownerId && ownerId !== userId) {
+        const preview = content.length > 80 ? content.substring(0, 77) + '...' : content;
+        await supabaseAdmin.from('notifications').insert({
+          user_id: ownerId,
+          title: 'New Comment in Your Group Post 💬',
+          message: `${commenterName} commented: "${preview}"`,
+          type: 'group_comment',
+          reference_id: postId,
+          is_read: false
+        });
+      }
+    }
 
     res.status(201).json(data);
   } catch (error) { res.status(500).json({ error: error.message }); }
