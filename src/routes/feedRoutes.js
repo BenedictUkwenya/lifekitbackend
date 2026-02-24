@@ -2,20 +2,19 @@ const express = require('express');
 const router = express.Router();
 const { supabase, supabaseAdmin } = require('../config/supabase');
 const authenticateAdmin = require('../middleware/adminMiddleware');
+const authenticateToken = require('../middleware/authMiddleware'); // Ensure this is imported
 
 // 1. GET /feeds/posts (Auth - includes like meta for current user)
-router.get('/posts', require('../middleware/authMiddleware'), async (req, res) => {
+router.get('/posts', authenticateToken, async (req, res) => {
   const userId = req.user.id;
   try {
     const { data, error } = await supabase
       .from('posts')
-      .select(
-        `
+      .select(`
         *,
         profiles(full_name, username, profile_picture_url),
         post_likes (user_id)
-      `,
-      )
+      `)
       .order('created_at', { ascending: false });
 
     if (error) throw error;
@@ -50,7 +49,7 @@ router.get('/events', async (req, res) => {
 });
 
 // 2b. GET /feeds/events/:id/meta  (likes + comments summary for one event)
-router.get('/events/:id/meta', require('../middleware/authMiddleware'), async (req, res) => {
+router.get('/events/:id/meta', authenticateToken, async (req, res) => {
   const eventId = req.params.id;
   const userId = req.user.id;
   try {
@@ -129,16 +128,13 @@ router.delete('/posts/:id', authenticateAdmin, async (req, res) => {
   }
 });
 
-// ... existing imports and GET routes ...
-const authenticateToken = require('../middleware/authMiddleware'); // Ensure this is imported
-
 // 5. POST /feeds/posts/:id/like - Toggle Like (Auth Required)
 router.post('/posts/:id/like', authenticateToken, async (req, res) => {
   const { id } = req.params; // Post ID
   const userId = req.user.id;
 
   try {
-    const { data: existingLike } = await supabase
+    const { data: existingLike } = await supabaseAdmin 
       .from('post_likes')
       .select('id')
       .eq('post_id', id)
@@ -148,14 +144,14 @@ router.post('/posts/:id/like', authenticateToken, async (req, res) => {
     let isLiked;
 
     if (existingLike) {
-      await supabase.from('post_likes').delete().eq('id', existingLike.id);
+      await supabaseAdmin.from('post_likes').delete().eq('id', existingLike.id);
       isLiked = false;
     } else {
-      await supabase.from('post_likes').insert({ post_id: id, user_id: userId });
+      await supabaseAdmin.from('post_likes').insert({ post_id: id, user_id: userId });
       isLiked = true;
     }
 
-    const { data: likesData, error: likesError } = await supabase
+    const { data: likesData, error: likesError } = await supabaseAdmin
       .from('post_likes')
       .select('id')
       .eq('post_id', id);
@@ -185,7 +181,7 @@ router.post('/events/:id/like', authenticateToken, async (req, res) => {
   const userId = req.user.id;
 
   try {
-    const { data: existingLike } = await supabase
+    const { data: existingLike } = await supabaseAdmin
       .from('event_likes')
       .select('*')
       .eq('event_id', id)
@@ -195,15 +191,14 @@ router.post('/events/:id/like', authenticateToken, async (req, res) => {
     let isLiked;
 
     if (existingLike) {
-      await supabase.from('event_likes').delete().eq('id', existingLike.id);
+      await supabaseAdmin.from('event_likes').delete().eq('id', existingLike.id);
       isLiked = false;
     } else {
-      await supabase.from('event_likes').insert({ event_id: id, user_id: userId });
+      await supabaseAdmin.from('event_likes').insert({ event_id: id, user_id: userId });
       isLiked = true;
     }
 
-    // Return fresh meta so client can sync counts optimistically if desired
-    const { data: likesData } = await supabase
+    const { data: likesData } = await supabaseAdmin
       .from('event_likes')
       .select('id')
       .eq('event_id', id);
@@ -220,7 +215,7 @@ router.post('/events/:id/like', authenticateToken, async (req, res) => {
 router.get('/posts/:id/comments', async (req, res) => {
   const { id } = req.params;
   try {
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin 
       .from('post_comments')
       .select('*, profiles(full_name, profile_picture_url)')
       .eq('post_id', id)
@@ -240,7 +235,7 @@ router.post('/posts/:id/comments', authenticateToken, async (req, res) => {
   const userId = req.user.id;
 
   try {
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin 
       .from('post_comments')
       .insert({ post_id: id, user_id: userId, content })
       .select('*, profiles(full_name, profile_picture_url)')
@@ -248,7 +243,7 @@ router.post('/posts/:id/comments', authenticateToken, async (req, res) => {
 
     if (error) throw error;
 
-    const { data: post } = await supabase
+    const { data: post } = await supabaseAdmin
       .from('posts')
       .select('*')
       .eq('id', id)
@@ -262,8 +257,7 @@ router.post('/posts/:id/comments', authenticateToken, async (req, res) => {
         .eq('id', id);
 
       const ownerId = post.user_id;
-      const commenterName =
-        data.profiles?.full_name || 'Someone';
+      const commenterName = data.profiles?.full_name || 'Someone';
 
       if (ownerId && ownerId !== userId) {
         const preview = content.length > 80 ? content.substring(0, 77) + '...' : content;
@@ -294,7 +288,7 @@ router.post('/toggle-bookmark', authenticateToken, async (req, res) => {
   }
 
   try {
-    const { data: existing } = await supabase
+    const { data: existing } = await supabaseAdmin 
       .from('saved_posts')
       .select('id')
       .eq('post_id', postId)
@@ -304,10 +298,10 @@ router.post('/toggle-bookmark', authenticateToken, async (req, res) => {
     let isSaved;
 
     if (existing) {
-      await supabase.from('saved_posts').delete().eq('id', existing.id);
+      await supabaseAdmin.from('saved_posts').delete().eq('id', existing.id);
       isSaved = false;
     } else {
-      await supabase.from('saved_posts').insert({
+      await supabaseAdmin.from('saved_posts').insert({
         post_id: postId,
         user_id: userId,
       });
@@ -327,25 +321,21 @@ router.get('/saved-posts', authenticateToken, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('saved_posts')
-      .select(
-        `
+      .select(`
         id,
         created_at,
         posts (
           *,
           profiles (full_name, username, profile_picture_url)
         )
-      `,
-      )
+      `)
       .eq('user_id', userId)
       .order('created_at', { ascending: false });
 
     if (error) throw error;
 
     const posts = Array.isArray(data)
-      ? data
-          .map((row) => row.posts)
-          .filter((p) => !!p)
+      ? data.map((row) => row.posts).filter((p) => !!p)
       : [];
 
     res.json(posts);
@@ -358,7 +348,7 @@ router.get('/saved-posts', authenticateToken, async (req, res) => {
 router.get('/events/:id/comments', authenticateToken, async (req, res) => {
   const { id } = req.params;
   try {
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('event_comments')
       .select('*, profiles(full_name, profile_picture_url)')
       .eq('event_id', id)
@@ -378,7 +368,7 @@ router.post('/events/:id/comments', authenticateToken, async (req, res) => {
   const userId = req.user.id;
 
   try {
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('event_comments')
       .insert({ event_id: id, user_id: userId, content })
       .select('*, profiles(full_name, profile_picture_url)')
@@ -386,7 +376,7 @@ router.post('/events/:id/comments', authenticateToken, async (req, res) => {
 
     if (error) throw error;
 
-    const { data: event } = await supabase
+    const { data: event } = await supabaseAdmin
       .from('events')
       .select('*')
       .eq('id', id)
@@ -394,8 +384,7 @@ router.post('/events/:id/comments', authenticateToken, async (req, res) => {
 
     if (event) {
       const ownerId = event.user_id || event.creator_id;
-      const commenterName =
-        data.profiles?.full_name || 'Someone';
+      const commenterName = data.profiles?.full_name || 'Someone';
 
       if (ownerId && ownerId !== userId) {
         const preview = content.length > 80 ? content.substring(0, 77) + '...' : content;
@@ -417,7 +406,23 @@ router.post('/events/:id/comments', authenticateToken, async (req, res) => {
 });
 
 
- 
+// ==========================================
+// --- GROUPS SECTION (Using supabaseAdmin) ---
+// ==========================================
+
+// Helper to filter content
+const isContentSafe = (text) => {
+  const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+  const phoneRegex = /(\+?\d{1,4}[\s-]?)?(\d{10,13})/g;
+  const blacklist = ['whatsapp', 'call me', 'contact me', 'phone number', 'telegram', 'send money', 'zelle', 'cashapp'];
+
+  const hasEmail = emailRegex.test(text);
+  const hasPhone = phoneRegex.test(text.replace(/\s/g, ''));
+  const hasBlacklisted = blacklist.some(word => text.toLowerCase().includes(word));
+
+  return !hasEmail && !hasPhone && !hasBlacklisted;
+};
+
 // 1. GET ALL GROUPS (With member counts)
 router.get('/groups', async (req, res) => {
   try {
@@ -430,7 +435,6 @@ router.get('/groups', async (req, res) => {
 
     if (error) throw error;
 
-    // Format the count properly
     const formattedGroups = data.map(g => ({
       ...g,
       members_count: g.members_count[0]?.count || 0
@@ -442,13 +446,35 @@ router.get('/groups', async (req, res) => {
   }
 });
 
+// GET /groups/:id (Include membership status)
+router.get('/groups/:id', authenticateToken, async (req, res) => {
+  const groupId = req.params.id;
+  const userId = req.user.id;
+
+  try {
+    const { data: group, error } = await supabaseAdmin.from('groups').select('*').eq('id', groupId).single();
+    if (error) throw error;
+
+    const { data: member } = await supabaseAdmin.from('group_members')
+      .select('*').eq('group_id', groupId).eq('user_id', userId).maybeSingle();
+
+    res.json({
+      group,
+      isMember: !!member,
+      isAdmin: member?.is_admin || false
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // 2. POST /groups (Create a Group)
 router.post('/groups', authenticateToken, async (req, res) => {
   const { name, description, image_url, anyone_can_post } = req.body;
   const userId = req.user.id;
 
   try {
-    const { data: group, error } = await supabase
+    const { data: group, error } = await supabaseAdmin
       .from('groups')
       .insert({ 
         name, 
@@ -463,33 +489,13 @@ router.post('/groups', authenticateToken, async (req, res) => {
     if (error) throw error;
 
     // Automatically make the creator an admin member
-    await supabase.from('group_members').insert({ 
+    await supabaseAdmin.from('group_members').insert({ 
       group_id: group.id, 
       user_id: userId, 
       is_admin: true 
     });
 
     res.status(201).json(group);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});// GET /groups/:id (Include membership status)
-router.get('/groups/:id', authenticateToken, async (req, res) => {
-  const groupId = req.params.id;
-  const userId = req.user.id;
-
-  try {
-    const { data: group, error } = await supabase.from('groups').select('*').eq('id', groupId).single();
-    if (error) throw error;
-
-    const { data: member } = await supabase.from('group_members')
-      .select('*').eq('group_id', groupId).eq('user_id', userId).maybeSingle();
-
-    res.json({
-      group,
-      isMember: !!member,
-      isAdmin: member?.is_admin || false
-    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -501,7 +507,7 @@ router.post('/groups/:id/join', authenticateToken, async (req, res) => {
   const userId = req.user.id;
 
   try {
-    const { error } = await supabase
+    const { error } = await supabaseAdmin
       .from('group_members')
       .insert({ group_id: groupId, user_id: userId });
 
@@ -516,29 +522,13 @@ router.post('/groups/:id/join', authenticateToken, async (req, res) => {
   }
 });
 
-// Helper to filter content
-const isContentSafe = (text) => {
-  // Regex to detect emails
-  const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-  // Regex to detect phone numbers (simple version)
-  const phoneRegex = /(\+?\d{1,4}[\s-]?)?(\d{10,13})/g;
-  // Blacklisted keywords
-  const blacklist = ['whatsapp', 'call me', 'contact me', 'phone number', 'telegram', 'send money'];
-
-  const hasEmail = emailRegex.test(text);
-  const hasPhone = phoneRegex.test(text);
-  const hasBlacklisted = blacklist.some(word => text.toLowerCase().includes(word));
-
-  return !hasEmail && !hasPhone && !hasBlacklisted;
-};
-
 // GET /groups/:id/posts - Get all posts for a specific group
 router.get('/groups/:id/posts', authenticateToken, async (req, res) => {
   const groupId = req.params.id;
   const userId = req.user.id;
 
   try {
-    const { data: posts, error } = await supabase
+    const { data: posts, error } = await supabaseAdmin
       .from('group_posts')
       .select(`
         *,
@@ -550,7 +540,6 @@ router.get('/groups/:id/posts', authenticateToken, async (req, res) => {
 
     if (error) throw error;
 
-    // Add a boolean "is_liked_by_me" for the UI
     const formattedPosts = posts.map(p => ({
       ...p,
       is_liked_by_me: p.group_post_likes.some(l => l.user_id === userId)
@@ -559,6 +548,7 @@ router.get('/groups/:id/posts', authenticateToken, async (req, res) => {
     res.json(formattedPosts);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
+
 // POST /groups/:id/posts
 router.post('/groups/:id/posts', authenticateToken, async (req, res) => {
   const { content, image_url } = req.body;
@@ -570,15 +560,14 @@ router.post('/groups/:id/posts', authenticateToken, async (req, res) => {
   }
 
   try {
-    // Check if only admin can post
-    const { data: group } = await supabase.from('groups').select('*').eq('id', groupId).single();
+    const { data: group } = await supabaseAdmin.from('groups').select('*').eq('id', groupId).single();
     if (!group.anyone_can_post) {
-      const { data: member } = await supabase.from('group_members')
+      const { data: member } = await supabaseAdmin.from('group_members')
         .select('is_admin').eq('group_id', groupId).eq('user_id', userId).single();
       if (!member || !member.is_admin) return res.status(403).json({ error: "Only admins can post in this group." });
     }
 
-    const { data, error } = await supabase.from('group_posts').insert({
+    const { data, error } = await supabaseAdmin.from('group_posts').insert({
       group_id: groupId, user_id: userId, content, image_url
     }).select().single();
 
@@ -589,10 +578,10 @@ router.post('/groups/:id/posts', authenticateToken, async (req, res) => {
   }
 });
 
-// 1. GET /groups/:id/members - Get list of members
+// GET /groups/:id/members - Get list of members
 router.get('/groups/:id/members', authenticateToken, async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('group_members')
       .select('*, profiles(id, full_name, profile_picture_url, username)')
       .eq('group_id', req.params.id);
@@ -604,19 +593,18 @@ router.get('/groups/:id/members', authenticateToken, async (req, res) => {
   }
 });
 
-// 2. PUT /groups/:id/settings - Update group permissions
+// PUT /groups/:id/settings - Update group permissions
 router.put('/groups/:id/settings', authenticateToken, async (req, res) => {
   const { anyone_can_post } = req.body;
   const userId = req.user.id;
 
   try {
-    // Check if user is admin of the group
-    const { data: member } = await supabase.from('group_members')
+    const { data: member } = await supabaseAdmin.from('group_members')
       .select('is_admin').eq('group_id', req.params.id).eq('user_id', userId).single();
 
     if (!member || !member.is_admin) return res.status(403).json({ error: "Only admins can change settings" });
 
-    const { error } = await supabase.from('groups')
+    const { error } = await supabaseAdmin.from('groups')
       .update({ anyone_can_post }).eq('id', req.params.id);
 
     if (error) throw error;
@@ -626,18 +614,18 @@ router.put('/groups/:id/settings', authenticateToken, async (req, res) => {
   }
 });
 
-// 3. DELETE /groups/:id/members/:targetUserId - Kick a member
+// DELETE /groups/:id/members/:targetUserId - Kick a member
 router.delete('/groups/:id/members/:targetUserId', authenticateToken, async (req, res) => {
   const { id, targetUserId } = req.params;
   const adminId = req.user.id;
 
   try {
-    const { data: adminMember } = await supabase.from('group_members')
+    const { data: adminMember } = await supabaseAdmin.from('group_members')
       .select('is_admin').eq('group_id', id).eq('user_id', adminId).single();
 
     if (!adminMember || !adminMember.is_admin) return res.status(403).json({ error: "Unauthorized" });
 
-    await supabase.from('group_members').delete().eq('group_id', id).eq('user_id', targetUserId);
+    await supabaseAdmin.from('group_members').delete().eq('group_id', id).eq('user_id', targetUserId);
     res.json({ message: "Member removed" });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -650,22 +638,23 @@ router.post('/groups/posts/:postId/like', authenticateToken, async (req, res) =>
   const userId = req.user.id;
 
   try {
-    const { data: existing } = await supabase
+    const { data: existing } = await supabaseAdmin
       .from('group_post_likes').select('*').eq('post_id', postId).eq('user_id', userId).maybeSingle();
 
     if (existing) {
-      await supabase.from('group_post_likes').delete().eq('id', existing.id);
+      await supabaseAdmin.from('group_post_likes').delete().eq('id', existing.id);
       res.json({ message: "Unliked", isLiked: false });
     } else {
-      await supabase.from('group_post_likes').insert({ post_id: postId, user_id: userId });
+      await supabaseAdmin.from('group_post_likes').insert({ post_id: postId, user_id: userId });
       res.json({ message: "Liked", isLiked: true });
     }
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
+
 // --- GROUP POST COMMENTS ---
 router.get('/groups/posts/:postId/comments', authenticateToken, async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('group_comments')
       .select('*, profiles(full_name, profile_picture_url)')
       .eq('post_id', req.params.postId)
@@ -683,7 +672,7 @@ router.post('/groups/posts/:postId/comments', authenticateToken, async (req, res
     const userId = req.user.id;
     const postId = req.params.postId;
 
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('group_comments')
       .insert({
         post_id: postId,
@@ -709,8 +698,7 @@ router.post('/groups/posts/:postId/comments', authenticateToken, async (req, res
         .eq('id', postId);
 
       const ownerId = post.user_id;
-      const commenterName =
-        data.profiles?.full_name || 'Someone';
+      const commenterName = data.profiles?.full_name || 'Someone';
 
       if (ownerId && ownerId !== userId) {
         const preview = content.length > 80 ? content.substring(0, 77) + '...' : content;
@@ -735,13 +723,12 @@ router.delete('/groups/:id/leave', authenticateToken, async (req, res) => {
   const userId = req.user.id;
 
   try {
-    // Prevent the creator from leaving? (Optional logic)
-    const { data: group } = await supabase.from('groups').select('creator_id').eq('id', groupId).single();
+    const { data: group } = await supabaseAdmin.from('groups').select('creator_id').eq('id', groupId).single();
     if (group.creator_id === userId) {
       return res.status(400).json({ error: "Creators cannot leave their own group. Delete the group instead." });
     }
 
-    const { error } = await supabase
+    const { error } = await supabaseAdmin
       .from('group_members')
       .delete()
       .eq('group_id', groupId)
@@ -754,7 +741,6 @@ router.delete('/groups/:id/leave', authenticateToken, async (req, res) => {
   }
 });
 
-
 // PUT /feeds/groups/:id/members/:targetUserId/admin - Promote/Demote member
 router.put('/groups/:id/members/:targetUserId/admin', authenticateToken, async (req, res) => {
   const { id, targetUserId } = req.params;
@@ -762,15 +748,14 @@ router.put('/groups/:id/members/:targetUserId/admin', authenticateToken, async (
   const requesterId = req.user.id;
 
   try {
-    // SECURITY: Check if requester is an admin of this group
-    const { data: requester } = await supabase.from('group_members')
+    const { data: requester } = await supabaseAdmin.from('group_members')
       .select('is_admin').eq('group_id', id).eq('user_id', requesterId).single();
 
     if (!requester || !requester.is_admin) {
       return res.status(403).json({ error: "Only admins can change roles." });
     }
 
-    const { error } = await supabase.from('group_members')
+    const { error } = await supabaseAdmin.from('group_members')
       .update({ is_admin })
       .eq('group_id', id)
       .eq('user_id', targetUserId);
@@ -788,15 +773,14 @@ router.delete('/groups/:id', authenticateToken, async (req, res) => {
   const userId = req.user.id;
 
   try {
-    // SECURITY: Only the creator can delete the group
-    const { data: group } = await supabase.from('groups')
+    const { data: group } = await supabaseAdmin.from('groups')
       .select('creator_id').eq('id', groupId).single();
 
     if (!group || group.creator_id !== userId) {
       return res.status(403).json({ error: "Only the group creator can delete this group." });
     }
 
-    const { error } = await supabase.from('groups').delete().eq('id', groupId);
+    const { error } = await supabaseAdmin.from('groups').delete().eq('id', groupId);
     if (error) throw error;
 
     res.json({ message: "Group and all associated content deleted." });
@@ -810,7 +794,6 @@ router.delete('/groups/posts/:postId', authenticateToken, async (req, res) => {
   const userId = req.user.id;
 
   try {
-    // 1. Get post details to check ownership and find the group
     const { data: post, error: postError } = await supabaseAdmin
       .from('group_posts')
       .select('user_id, group_id, content')
@@ -819,7 +802,6 @@ router.delete('/groups/posts/:postId', authenticateToken, async (req, res) => {
 
     if (postError || !post) return res.status(404).json({ error: "Post not found" });
 
-    // 2. Check if user is an ADMIN of the group
     const { data: member } = await supabaseAdmin
       .from('group_members')
       .select('is_admin')
@@ -834,11 +816,9 @@ router.delete('/groups/posts/:postId', authenticateToken, async (req, res) => {
       return res.status(403).json({ error: "Unauthorized to delete this post" });
     }
 
-    // 3. Delete the post
     const { error: deleteError } = await supabaseAdmin.from('group_posts').delete().eq('id', postId);
     if (deleteError) throw deleteError;
 
-    // 4. NOTIFY the owner if an ADMIN deleted it
     if (isAdmin && !isOwner) {
       await supabaseAdmin.from('notifications').insert({
         user_id: post.user_id,
