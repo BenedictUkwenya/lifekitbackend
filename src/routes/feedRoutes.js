@@ -533,7 +533,21 @@ router.get('/groups/:id/posts', authenticateToken, async (req, res) => {
       .select(`
         *,
         profiles (full_name, profile_picture_url, username),
-        group_post_likes (user_id)
+        group_post_likes (user_id),
+        parent: parent_id (
+          id,
+          content,
+          user_id,
+          profiles: user_id (full_name)
+        ),
+        services (
+          id,
+          title, 
+          price, 
+          image_url, 
+          user_id,
+          profiles: user_id (full_name, profile_picture_url)
+        )
       `)
       .eq('group_id', groupId)
       .order('created_at', { ascending: false });
@@ -551,7 +565,7 @@ router.get('/groups/:id/posts', authenticateToken, async (req, res) => {
 
 // POST /groups/:id/posts
 router.post('/groups/:id/posts', authenticateToken, async (req, res) => {
-  const { content, image_url } = req.body;
+  const { content, image_url, service_id, parent_id } = req.body;
   const groupId = req.params.id;
   const userId = req.user.id;
 
@@ -568,7 +582,12 @@ router.post('/groups/:id/posts', authenticateToken, async (req, res) => {
     }
 
     const { data, error } = await supabaseAdmin.from('group_posts').insert({
-      group_id: groupId, user_id: userId, content, image_url
+      group_id: groupId, 
+      user_id: userId, 
+      content, 
+      image_url,
+      service_id: service_id || null,
+      parent_id: parent_id || null
     }).select().single();
 
     if (error) throw error;
