@@ -378,5 +378,67 @@ router.delete('/users/admins/:id', async (req, res) => {
   }
 });
 
+// GET /admin/category-requests - View all pending requests
+router.get('/category-requests', async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('requested_categories')
+      .select('*, profiles(full_name, email)')
+      .eq('status', 'pending') // Only show pending
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /admin/category-requests/:id/approve - Approve & Create
+router.post('/category-requests/:id/approve', async (req, res) => {
+  const { id } = req.params;
+  const { name, parent_id } = req.body; // Admin can rename it or assign a parent
+
+  try {
+    // 1. Create the actual category
+    const { data: newCat, error: createError } = await supabaseAdmin
+      .from('service_categories')
+      .insert({
+        name: name,
+        is_standalone: false, // Default to standard, admin can edit later
+        parent_category_id: parent_id || null
+      })
+      .select()
+      .single();
+
+    if (createError) throw createError;
+
+    // 2. Mark request as approved
+    await supabaseAdmin
+      .from('requested_categories')
+      .update({ status: 'approved' })
+      .eq('id', id);
+
+    res.json({ message: "Category created and request approved", category: newCat });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// DELETE /admin/category-requests/:id/reject - Reject
+router.delete('/category-requests/:id/reject', async (req, res) => {
+  try {
+    // Just mark as rejected (or delete row if you prefer)
+    await supabaseAdmin
+      .from('requested_categories')
+      .update({ status: 'rejected' })
+      .eq('id', req.params.id);
+      
+    res.json({ message: "Request rejected" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // THIS MUST BE THE LAST LINE
 module.exports = router;

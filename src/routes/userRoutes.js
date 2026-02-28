@@ -38,14 +38,6 @@ router.get('/profile', authenticateToken, async (req, res) => {
 });
 
 // =============================================================================
-// 2. UPDATE PROFILE
-// Fix: Uses supabaseAdmin to bypass RLS and handles all fields including job_title
-// =============================================================================
-// =============================================================================
-// 2. UPDATE PROFILE (Fixed: Uses upsert to prevent "Cannot coerce" error)
-// =============================================================================
-
-// =============================================================================
 // 2. UPDATE PROFILE (Fixed: Ensures Email exists for Upsert)
 // =============================================================================
 router.put('/profile', authenticateToken, async (req, res) => {
@@ -101,31 +93,22 @@ router.put('/profile', authenticateToken, async (req, res) => {
   }
 });
 
-// 3. GET NOTIFICATIONS
+// =============================================================================
+// 3. GET NOTIFICATIONS (Merged & Fixed)
 // =============================================================================
 router.get('/notifications', authenticateToken, async (req, res) => {
   const userId = req.user.id;
-
   try {
-    const { data: notifications, error } = await supabase
+    const { data: notifications, error } = await supabaseAdmin // FIXED: Use Admin
       .from('notifications')
       .select('*')
       .eq('user_id', userId)
       .order('created_at', { ascending: false });
 
-    if (error) {
-      console.error('Supabase fetch notifications error:', error.message);
-      return res.status(500).json({ error: 'Failed to fetch notifications.' });
-    }
-
-    res.status(200).json({
-      message: 'Notifications fetched successfully!',
-      notifications: notifications,
-    });
-
+    if (error) throw error;
+    res.status(200).json({ notifications: notifications });
   } catch (error) {
-    console.error('Unexpected error fetching notifications:', error.message);
-    res.status(500).json({ error: 'Internal server error fetching notifications.' });
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -214,55 +197,45 @@ router.get('/schedule/:providerId', async (req, res) => {
   }
 });
 
-// GET /users/counts - Get unread counts for Badges
+// =============================================================================
+// 6. GET COUNTS (Merged & Fixed)
+// =============================================================================
 router.get('/counts', authenticateToken, async (req, res) => {
   const userId = req.user.id;
-
   try {
-    // 1. Count Unread Notifications
-    const { count: notifCount, error: notifError } = await supabase
+    // 1. Notification Count
+    const { count: notifCount, error: notifError } = await supabaseAdmin // FIXED: Use Admin
       .from('notifications')
-      .select('*', { count: 'exact', head: true }) // head: true means don't return data, just count
+      .select('*', { count: 'exact', head: true })
       .eq('user_id', userId)
       .eq('is_read', false);
 
     if (notifError) throw notifError;
 
-    // 2. Count Unread Chat Messages
-    // (Messages where I am the receiver and is_read is false)
-    // We need to join with bookings to find where I am the receiver, 
-    // OR simpler: assume messages sent by others to my bookings are for me.
-    // The most robust way with your current schema:
-    
-    // Find bookings where I am involved
-    // Find bookings where I am involved AND the chat is NOT locked
-    const { data: myBookings } = await supabase
+    // 2. Chat Count
+    // First, find active bookings I'm involved in
+    const { data: myBookings } = await supabaseAdmin // FIXED: Use Admin
         .from('bookings')
         .select('id')
         .or(`client_id.eq.${userId},provider_id.eq.${userId}`)
-        .not('status', 'in', '("completed","cancelled")'); // <--- THIS FIXES IT
+        .not('status', 'in', '("completed","cancelled")'); 
     
-    const bookingIds = myBookings.map(b => b.id);
+    const bookingIds = myBookings ? myBookings.map(b => b.id) :[];
 
     let chatCount = 0;
     if (bookingIds.length > 0) {
-        const { count, error: chatError } = await supabase
+        const { count, error: chatError } = await supabaseAdmin // FIXED: Use Admin
             .from('messages')
             .select('*', { count: 'exact', head: true })
             .in('booking_id', bookingIds)
-            .neq('sender_id', userId) // Messages NOT sent by me
+            .neq('sender_id', userId)
             .eq('is_read', false);
         
         if (!chatError) chatCount = count;
     }
 
-    res.status(200).json({
-      notifications: notifCount || 0,
-      chats: chatCount || 0
-    });
-
+    res.status(200).json({ notifications: notifCount || 0, chats: chatCount || 0 });
   } catch (error) {
-    console.error('Counts Error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });

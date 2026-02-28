@@ -523,6 +523,7 @@ router.post('/groups/:id/join', authenticateToken, async (req, res) => {
 });
 
 // GET /groups/:id/posts - Get all posts for a specific group
+// GET /groups/:id/posts - Get all posts for a specific group
 router.get('/groups/:id/posts', authenticateToken, async (req, res) => {
   const groupId = req.params.id;
   const userId = req.user.id;
@@ -544,9 +545,9 @@ router.get('/groups/:id/posts', authenticateToken, async (req, res) => {
           id,
           title, 
           price, 
-          image_url, 
-          user_id,
-          profiles: user_id (full_name, profile_picture_url)
+          image_urls, 
+          provider_id,
+          profiles: provider_id (full_name, profile_picture_url)
         )
       `)
       .eq('group_id', groupId)
@@ -556,13 +557,15 @@ router.get('/groups/:id/posts', authenticateToken, async (req, res) => {
 
     const formattedPosts = posts.map(p => ({
       ...p,
-      is_liked_by_me: p.group_post_likes.some(l => l.user_id === userId)
+      is_liked_by_me: p.group_post_likes ? p.group_post_likes.some(l => l.user_id === userId) : false
     }));
 
     res.json(formattedPosts);
-  } catch (error) { res.status(500).json({ error: error.message }); }
+  } catch (error) { 
+    console.error("Group posts error:", error.message);
+    res.status(500).json({ error: error.message }); 
+  }
 });
-
 // POST /groups/:id/posts
 router.post('/groups/:id/posts', authenticateToken, async (req, res) => {
   const { content, image_url, service_id, parent_id } = req.body;

@@ -1,7 +1,7 @@
 // src/routes/serviceRoutes.js
 const express = require('express');
 const router = express.Router();
-const { supabase } = require('../config/supabase');
+const { supabase, supabaseAdmin } = require('../config/supabase');
 const authenticateToken = require('../middleware/authMiddleware');
 
 // --- Service Listing & Management Endpoints ---
@@ -406,6 +406,33 @@ router.get('/:id', async (req, res) => {
     } catch (error) {
         console.error('Unexpected error fetching single service:', error.message);
         res.status(500).json({ error: 'Internal server error fetching service.' });
+    }
+});
+
+// POST /services/request-category - Let providers request a new category
+router.post('/request-category', authenticateToken, async (req, res) => {
+    const { category_name, description } = req.body;
+    const userId = req.user.id;
+
+    if (!category_name) {
+        return res.status(400).json({ error: "Category name is required." });
+    }
+
+    try {
+        const { error } = await supabaseAdmin.from('requested_categories').insert({
+            user_id: userId,
+            category_name,
+            description
+        });
+
+        if (error) throw error;
+
+        // Optional: Notify the Admin (if you have a specific Admin ID, or just store it in DB for the panel)
+        
+        res.status(201).json({ message: "Category request submitted successfully!" });
+    } catch (error) {
+        console.error("Request Category Error:", error.message);
+        res.status(500).json({ error: "Failed to submit request." });
     }
 });
 

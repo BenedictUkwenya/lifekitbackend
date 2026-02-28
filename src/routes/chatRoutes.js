@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { supabase, supabaseAdmin } = require('../config/supabase'); // Ensure supabaseAdmin is imported
+const { supabaseAdmin } = require('../config/supabase'); // Using Admin to bypass RLS
 const authenticateToken = require('../middleware/authMiddleware');
 
 // =============================================================================
@@ -11,7 +11,8 @@ router.get('/', authenticateToken, async (req, res) => {
 
   try {
     // 1. Fetch all bookings involving the user
-    const { data: bookings, error } = await supabase
+    // Using supabaseAdmin ensures we get data even if RLS is strict
+    const { data: bookings, error } = await supabaseAdmin
       .from('bookings')
       .select(`
         *,
@@ -70,7 +71,7 @@ router.get('/:bookingId', authenticateToken, async (req, res) => {
   const { bookingId } = req.params;
 
   try {
-    const { data: messages, error } = await supabase
+    const { data: messages, error } = await supabaseAdmin
       .from('messages')
       .select('*')
       .eq('booking_id', bookingId)
@@ -95,7 +96,7 @@ router.post('/message', authenticateToken, async (req, res) => {
 
   try {
     // 1. Fetch Booking Status & Details
-    const { data: booking, error: bookingError } = await supabase
+    const { data: booking, error: bookingError } = await supabaseAdmin
       .from('bookings')
       .select('status, client_id, provider_id, services(title)')
       .eq('id', booking_id)
@@ -113,7 +114,7 @@ router.post('/message', authenticateToken, async (req, res) => {
     const receiverId = (senderId === booking.client_id) ? booking.provider_id : booking.client_id;
 
     // 4. Insert Message
-    const { error: msgError } = await supabase
+    const { error: msgError } = await supabaseAdmin
       .from('messages')
       .insert({
         booking_id,
@@ -125,7 +126,6 @@ router.post('/message', authenticateToken, async (req, res) => {
     if (msgError) throw msgError;
 
     // 5. Notify Receiver
-    // We use supabaseAdmin to ensure we have permission to write to notifications
     await supabaseAdmin.from('notifications').insert({
       user_id: receiverId,
       title: 'New Message 💬',
