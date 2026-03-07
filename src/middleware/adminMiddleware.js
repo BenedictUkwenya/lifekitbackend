@@ -8,15 +8,30 @@ async function authenticateAdmin(req, res, next) {
   if (token == null) return res.status(401).json({ error: 'Token required' });
 
   try {
-    // 1. Verify the Token using standard client (Validates the JWT)
-    const { data: { user }, error } = await supabase.auth.getUser(token);
-
-    if (error || !user) {
-      return res.status(403).json({ error: 'Invalid or expired token' });
+    console.log("Admin Auth: start");
+    let user;
+    try {
+      const { data, error } = await supabase.auth.getUser(token);
+      if (error || !data?.user) {
+        console.error("Admin Auth: getUser error", {
+          message: error?.message,
+          status: error?.status,
+          code: error?.code
+        });
+        return res.status(401).json({ error: 'Invalid or expired token' });
+      }
+      user = data.user;
+      console.log("Admin Auth: token verified", { userId: user.id });
+    } catch (err) {
+      console.error("Admin Auth: getUser failed", {
+        message: err?.message,
+        code: err?.code,
+        cause: err?.cause
+      });
+      return res.status(401).json({ error: 'Invalid or expired token' });
     }
 
-    // 2. CHECK DATABASE ROLE using **supabaseAdmin**
-    // supabaseAdmin BYPASSES RLS, so it can definitely read the row.
+    console.log("Admin Auth: fetching profile role", { userId: user.id });
     const { data: profile, error: profileError } = await supabaseAdmin
       .from('profiles')
       .select('role')
@@ -24,17 +39,18 @@ async function authenticateAdmin(req, res, next) {
       .single();
 
     if (profileError || !profile) {
-      console.error("Admin Check Failed: Profile not found for user", user.id);
+      console.error("Admin Auth: profile lookup failed", {
+        userId: user.id,
+        message: profileError?.message
+      });
       return res.status(403).json({ error: 'Profile not found' });
     }
 
-    // 3. Verify the Role
     if (profile.role !== 'admin') {
       console.warn(`User ${user.email} (Role: ${profile.role}) tried to access admin area.`);
       return res.status(403).json({ error: 'Access Denied: Admins only.' });
     }
 
-    // Success!
     req.user = user;
     next();
 

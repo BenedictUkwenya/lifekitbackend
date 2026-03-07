@@ -12,6 +12,7 @@ const storageRoutes = require('./src/routes/storageRoutes');
 const bookingRoutes = require('./src/routes/bookingRoutes'); 
 const walletRoutes = require('./src/routes/walletRoutes');
 const adminRoutes = require('./src/routes/adminRoutes'); // Don't forget this!
+const supportRoutes = require('./src/routes/supportRoutes');
 const { supabase } = require('./src/config/supabase'); 
 const eventRoutes = require('./src/routes/eventRoutes');
 const feedRoutes = require('./src/routes/feedRoutes');
@@ -49,6 +50,7 @@ app.use('/bookings', bookingRoutes);
 app.use('/storage', storageRoutes);
 app.use('/wallet', walletRoutes);
 app.use('/admin', adminRoutes); // <--- Ensure Admin routes are registered
+app.use('/support', supportRoutes);
 app.use('/events', eventRoutes);
 app.use('/feeds', feedRoutes);
 app.use('/chats', chatRoutes); 

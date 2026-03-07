@@ -446,6 +446,79 @@ router.post('/notifications/send', async (req, res) => {
   }
 });
 
+// GET /admin/support
+router.get('/support', async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('support_tickets')
+      .select('*, profiles(full_name, email)')
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PUT /admin/support/:id/reply
+router.put('/support/:id/reply', async (req, res) => {
+  const { id } = req.params;
+  const { reply } = req.body;
+
+  try {
+    if (!reply) {
+      return res.status(400).json({ error: 'Reply is required' });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('support_tickets')
+      .update({ admin_reply: reply, status: 'closed' })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json({ ticket: data });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /admin/reports
+router.get('/reports', async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('user_reports')
+      .select('*, reporter:reporter_id(full_name, email), reported:reported_user_id(full_name, email)')
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PUT /admin/reports/:id/resolve
+router.put('/reports/:id/resolve', async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('user_reports')
+      .update({ status: 'resolved' })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json({ report: data });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // GET /admin/category-requests - View all pending requests
 router.get('/category-requests', async (req, res) => {
   try {
