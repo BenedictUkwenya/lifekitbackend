@@ -378,6 +378,74 @@ router.delete('/users/admins/:id', async (req, res) => {
   }
 });
 
+// GET /admin/users/all
+router.get('/users/all', async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('profiles')
+      .select('*')
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PUT /admin/users/:id/status
+router.put('/users/:id/status', async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+  const allowedStatuses = ['active', 'suspended', 'blocked'];
+
+  try {
+    if (!allowedStatuses.includes(status)) {
+      return res.status(400).json({ error: 'Invalid status' });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('profiles')
+      .update({ status })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json({ message: 'User status updated', profile: data });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /admin/notifications/send
+router.post('/notifications/send', async (req, res) => {
+  const { user_id, message, title } = req.body;
+
+  try {
+    if (!user_id || !message) {
+      return res.status(400).json({ error: 'user_id and message are required' });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('notifications')
+      .insert({
+        user_id,
+        title: title || 'Admin Warning',
+        message,
+        type: 'admin_warning',
+        reference_id: null,
+        is_read: false
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json({ message: 'Notification sent', notification: data });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // GET /admin/category-requests - View all pending requests
 router.get('/category-requests', async (req, res) => {
   try {
