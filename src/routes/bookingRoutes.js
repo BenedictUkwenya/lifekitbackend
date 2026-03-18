@@ -100,6 +100,87 @@ router.post('/', authenticateToken, async (req, res) => {
 });
 
 /**
+ * 1.5 POST /bookings/:id/dispute - Open a dispute
+ */
+router.post('/:id/dispute', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { reason } = req.body;
+  const userId = req.user.id;
+
+  if (!reason) {
+    return res.status(400).json({ error: 'Reason is required.' });
+  }
+
+  try {
+    const { data: booking, error: bookingError } = await supabaseAdmin
+      .from('bookings')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (bookingError || !booking) {
+      return res.status(404).json({ error: 'Booking not found.' });
+    }
+
+    if (booking.client_id !== userId && booking.provider_id !== userId) {
+      return res.status(403).json({ error: 'Unauthorized action.' });
+    }
+
+    const { data: existingDisputes } = await supabaseAdmin
+      .from('disputes')
+      .select('id')
+      .eq('booking_id', id)
+      .eq('status', 'open')
+      .limit(1);
+
+    if (existingDisputes && existingDisputes.length > 0) {
+      return res.status(400).json({ error: 'An open dispute already exists.' });
+    }
+
+    const { error: updateError } = await supabaseAdmin
+      .from('bookings')
+      .update({ status: 'disputed' })
+      .eq('id', id);
+
+    if (updateError) {
+      return res.status(500).json({ error: 'Failed to update booking status.' });
+    }
+
+    const { data: dispute, error: disputeError } = await supabaseAdmin
+      .from('disputes')
+      .insert({
+        booking_id: id,
+        initiator_id: userId,
+        reason,
+        status: 'open'
+      })
+      .select()
+      .single();
+
+    if (disputeError) {
+      return res.status(500).json({ error: 'Failed to create dispute.' });
+    }
+
+    const otherUserId =
+      booking.client_id === userId ? booking.provider_id : booking.client_id;
+
+    await supabaseAdmin.from('notifications').insert({
+      user_id: otherUserId,
+      title: 'Booking Dispute Opened',
+      message: 'A dispute has been opened for your booking. Admin review in progress.',
+      type: 'booking_dispute',
+      reference_id: id,
+      is_read: false
+    });
+
+    res.status(201).json({ message: 'Dispute opened.', dispute });
+  } catch (error) {
+    console.error('Dispute error:', error.message);
+    res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
+/**
  * 2. PUT /bookings/:id/status - Provider Accepts or Rejects
  * Logic: If Cancelled/Rejected -> REFUND THE CLIENT
  */

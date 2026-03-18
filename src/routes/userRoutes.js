@@ -94,6 +94,37 @@ router.put('/profile', authenticateToken, async (req, res) => {
 });
 
 // =============================================================================
+// DELETE PROFILE
+// =============================================================================
+router.delete('/profile', authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+
+  try {
+    const { error: profileError } = await supabaseAdmin
+      .from('profiles')
+      .update({
+        full_name: 'Deleted User',
+        email: `deleted_${userId}@deleted.local`,
+        profile_picture_url: null,
+        username: null,
+        phone_number: null,
+        bio: null,
+        job_title: null,
+        status: 'deleted'
+      })
+      .eq('id', userId);
+    if (profileError) throw profileError;
+
+    const { error: authError } = await supabaseAdmin.auth.admin.deleteUser(userId);
+    if (authError) throw authError;
+
+    res.status(200).json({ message: 'Account deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =============================================================================
 // 3. GET NOTIFICATIONS (Merged & Fixed)
 // =============================================================================
 router.get('/notifications', authenticateToken, async (req, res) => {

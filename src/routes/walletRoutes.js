@@ -60,6 +60,11 @@ router.get('/', authenticateToken, async (req, res) => {
 
   try {
     const wallet = await getOrCreateWallet(userId, email);
+    const { data: profile } = await supabaseAdmin
+      .from('profiles')
+      .select('is_service_provider, stripe_connect_id')
+      .eq('id', userId)
+      .single();
 
     const { data: transactions } = await supabase
       .from('transactions')
@@ -71,6 +76,9 @@ router.get('/', authenticateToken, async (req, res) => {
     res.status(200).json({
       balance: wallet.balance,
       currency: wallet.currency,
+      is_provider: profile?.is_service_provider || false,
+      stripe_connect_id: profile?.stripe_connect_id || null,
+      stripe_connected: !!profile?.stripe_connect_id,
       transactions: transactions || []
     });
   } catch (error) {
@@ -170,7 +178,82 @@ router.post('/confirm-deposit', authenticateToken, async (req, res) => {
 });
 
 /**
- * 4. POST /wallet/withdraw
+ * 4. POST /wallet/onboard-connect
+ */
+router.post('/onboard-connect', authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  const email = req.user.email;
+
+  try {
+    const { data: profile } = await supabaseAdmin
+      .from('profiles')
+      .select('stripe_connect_id')
+      .eq('id', userId)
+      .single();
+
+    let accountId = profile?.stripe_connect_id;
+    if (!accountId) {
+      const account = await stripe.accounts.create({
+        type: 'express',
+        email: email,
+        capabilities: { transfers: { requested: true } }
+      });
+      accountId = account.id;
+
+      const { error: updateError } = await supabaseAdmin
+        .from('profiles')
+        .update({ stripe_connect_id: accountId })
+        .eq('id', userId);
+
+      if (updateError) {
+        return res.status(500).json({ error: 'Failed to save Stripe account.' });
+      }
+    }
+
+    const refreshUrl = process.env.STRIPE_CONNECT_REFRESH_URL || 'http://localhost:3000/stripe/refresh';
+    const returnUrl = process.env.STRIPE_CONNECT_RETURN_URL || 'http://localhost:3000/stripe/return';
+
+    const accountLink = await stripe.accountLinks.create({
+      account: accountId,
+      refresh_url: refreshUrl,
+      return_url: returnUrl,
+      type: 'account_onboarding'
+    });
+
+    res.status(200).json({ url: accountLink.url });
+  } catch (error) {
+    console.error('Connect onboarding error:', error.message);
+    res.status(500).json({ error: 'Failed to start Stripe onboarding.' });
+  }
+});
+
+/**
+ * 5. POST /wallet/login-link
+ */
+router.post('/login-link', authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+
+  try {
+    const { data: profile } = await supabaseAdmin
+      .from('profiles')
+      .select('stripe_connect_id')
+      .eq('id', userId)
+      .single();
+
+    if (!profile?.stripe_connect_id) {
+      return res.status(400).json({ error: 'Stripe account not connected.' });
+    }
+
+    const loginLink = await stripe.accounts.createLoginLink(profile.stripe_connect_id);
+    res.status(200).json({ url: loginLink.url });
+  } catch (error) {
+    console.error('Login link error:', error.message);
+    res.status(500).json({ error: 'Failed to create login link.' });
+  }
+});
+
+/**
+ * 6. POST /wallet/withdraw
  */
 router.post('/withdraw', authenticateToken, async (req, res) => {
   const { amount } = req.body;
@@ -178,15 +261,42 @@ router.post('/withdraw', authenticateToken, async (req, res) => {
   const email = req.user.email;
 
   try {
+    if (!amount || Number(amount) <= 0) {
+      return res.status(400).json({ error: 'Invalid amount.' });
+    }
+
     const wallet = await getOrCreateWallet(userId, email);
 
     if (wallet.balance < amount) {
       return res.status(400).json({ error: 'Insufficient funds' });
     }
 
-    // USE ADMIN for balance deduction
+    const { data: profile } = await supabaseAdmin
+      .from('profiles')
+      .select('stripe_connect_id')
+      .eq('id', userId)
+      .single();
+
+    if (!profile?.stripe_connect_id) {
+      return res.status(400).json({ error: 'Stripe account not connected.' });
+    }
+
+    const transfer = await stripe.transfers.create({
+      amount: Math.round(Number(amount) * 100),
+      currency: 'usd',
+      destination: profile.stripe_connect_id,
+      metadata: {
+        userId: userId,
+        walletId: wallet.id
+      }
+    });
+
+    if (!transfer || !transfer.id) {
+      return res.status(500).json({ error: 'Transfer failed.' });
+    }
+
     const newBalance = parseFloat(wallet.balance) - parseFloat(amount);
-    
+
     await supabaseAdmin
       .from('wallets')
       .update({ balance: newBalance })
@@ -197,14 +307,13 @@ router.post('/withdraw', authenticateToken, async (req, res) => {
       type: 'withdrawal',
       amount: -amount,
       status: 'success',
-      description: 'Withdrawal Request'
+      description: 'Stripe payout'
     });
 
-    res.status(200).json({ 
-      message: 'Withdrawal initiated successfully.',
-      new_balance: newBalance 
+    res.status(200).json({
+      message: 'Withdrawal completed successfully.',
+      new_balance: newBalance
     });
-
   } catch (error) {
     console.error('Withdraw error:', error.message);
     res.status(500).json({ error: 'Withdrawal failed' });
