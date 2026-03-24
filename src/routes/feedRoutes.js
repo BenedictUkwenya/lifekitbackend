@@ -4,6 +4,51 @@ const { supabase, supabaseAdmin } = require('../config/supabase');
 const authenticateAdmin = require('../middleware/adminMiddleware');
 const authenticateToken = require('../middleware/authMiddleware'); // Ensure this is imported
 
+const COMMUNITY_LIMITS_BY_TIER = {
+  free: 1,
+  plus: 3,
+  pro: 5,
+  business: Infinity
+};
+
+const COMMUNITY_UPGRADE_TARGET = {
+  free: 'Plus',
+  plus: 'Pro',
+  pro: 'Business'
+};
+
+const normalizeTier = (tier) => {
+  if (!tier || typeof tier !== 'string') return 'free';
+  return tier.toLowerCase();
+};
+
+const getCommunityLimitContext = async (userId) => {
+  const { data: profile, error: profileError } = await supabaseAdmin
+    .from('profiles')
+    .select('subscription_tier')
+    .eq('id', userId)
+    .maybeSingle();
+
+  if (profileError) throw profileError;
+
+  const subscriptionTier = normalizeTier(profile?.subscription_tier);
+  const communityLimit = COMMUNITY_LIMITS_BY_TIER[subscriptionTier] ?? COMMUNITY_LIMITS_BY_TIER.free;
+  const upgradeTier = COMMUNITY_UPGRADE_TARGET[subscriptionTier] || 'Business';
+
+  const { count: currentCommunityCount, error: countError } = await supabaseAdmin
+    .from('group_members')
+    .select('id', { count: 'exact', head: true })
+    .eq('user_id', userId);
+
+  if (countError) throw countError;
+
+  return {
+    communityLimit,
+    currentCommunityCount: currentCommunityCount || 0,
+    upgradeTier
+  };
+};
+
 // 1. GET /feeds/posts (Auth - includes like meta for current user)
 router.get('/posts', authenticateToken, async (req, res) => {
   const userId = req.user.id;
@@ -560,6 +605,16 @@ router.post('/groups', authenticateToken, async (req, res) => {
   const userId = req.user.id;
 
   try {
+    const {
+      communityLimit,
+      currentCommunityCount,
+      upgradeTier
+    } = await getCommunityLimitContext(userId);
+
+    if (communityLimit !== Infinity && currentCommunityCount >= communityLimit) {
+      return res.status(403).json({ error: `Upgrade to ${upgradeTier} to join more communities.` });
+    }
+
     const { data: group, error } = await supabaseAdmin
       .from('groups')
       .insert({ 
@@ -593,6 +648,27 @@ router.post('/groups/:id/join', authenticateToken, async (req, res) => {
   const userId = req.user.id;
 
   try {
+    const { data: existingMembership } = await supabaseAdmin
+      .from('group_members')
+      .select('id')
+      .eq('group_id', groupId)
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    if (existingMembership) {
+      return res.status(400).json({ error: "Already a member" });
+    }
+
+    const {
+      communityLimit,
+      currentCommunityCount,
+      upgradeTier
+    } = await getCommunityLimitContext(userId);
+
+    if (communityLimit !== Infinity && currentCommunityCount >= communityLimit) {
+      return res.status(403).json({ error: `Upgrade to ${upgradeTier} to join more communities.` });
+    }
+
     const { error } = await supabaseAdmin
       .from('group_members')
       .insert({ group_id: groupId, user_id: userId });

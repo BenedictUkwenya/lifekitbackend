@@ -17,6 +17,7 @@ const { supabase } = require('./src/config/supabase');
 const eventRoutes = require('./src/routes/eventRoutes');
 const feedRoutes = require('./src/routes/feedRoutes');
 const chatRoutes = require('./src/routes/chatRoutes'); 
+const upgradeRoutes = require('./src/routes/upgradeRoutes');
 
 const reviewRoutes = require('./src/routes/reviewRoutes');
 // ...
@@ -55,6 +56,7 @@ app.use('/events', eventRoutes);
 app.use('/feeds', feedRoutes);
 app.use('/chats', chatRoutes); 
 app.use('/reviews', reviewRoutes);
+app.use('/upgrades', upgradeRoutes);
 
 
 // --- SERVER STARTUP (Modified for Vercel) ---

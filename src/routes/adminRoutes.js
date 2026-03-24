@@ -9,7 +9,7 @@ const { startOfMonth, startOfWeek, startOfYear, subMonths, format } = require('d
 // Apply Admin Security to all routes
 router.use(authenticateAdmin);
 
-const COMMISSION_RATE = 0.20; // 20% commission
+const COMMISSION_RATE = 0.08; // 8% commission
 
 /**
  * =========================================================================
@@ -46,7 +46,7 @@ router.get('/analytics', async (req, res) => {
     const totalRevenue = transactionsRes.data.reduce((sum, t) => sum + Number(t.amount), 0);
     const totalWithdrawals = withdrawalsRes.data.reduce((sum, t) => sum + Math.abs(Number(t.amount)), 0);
     
-    // Logic: Your profit is 20% of total revenue
+    // Logic: Your profit is 8% of total revenue
     const grossProfit = totalRevenue * COMMISSION_RATE; 
     // Available to withdraw = Profit - What you already took out
     const availableBalance = grossProfit - totalWithdrawals;

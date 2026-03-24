@@ -4,6 +4,24 @@ const router = express.Router();
 const { supabase, supabaseAdmin } = require('../config/supabase');
 const authenticateToken = require('../middleware/authMiddleware');
 
+const SERVICE_LIMITS_BY_TIER = {
+    free: 0,
+    plus: 1,
+    pro: 5,
+    business: Infinity
+};
+
+const SERVICE_UPGRADE_TARGET = {
+    free: 'Plus',
+    plus: 'Pro',
+    pro: 'Business'
+};
+
+const normalizeTier = (tier) => {
+    if (!tier || typeof tier !== 'string') return 'free';
+    return tier.toLowerCase();
+};
+
 // --- Service Listing & Management Endpoints ---
 
 // NOTE ON ORDERING: The general parameterized routes (like /:id) must come AFTER 
@@ -66,11 +84,8 @@ router.post('/', authenticateToken, async (req, res) => {
              return res.status(400).json({ error: 'No valid categories found.' });
         }
 
-        // 2. Check if these are sub-categories of a Standalone Parent
-        // We assume all selected IDs belong to the same parent flow for now
         const firstCat = selectedCats[0];
         
-        // Fetch Parent to check 'is_standalone' status
         let parentCat = null;
         if (firstCat.parent_category_id) {
             const { data: parent } = await supabase
@@ -81,30 +96,52 @@ router.post('/', authenticateToken, async (req, res) => {
             parentCat = parent;
         }
 
-        // --- BRANCH A: STANDALONE SERVICE (e.g. Plumbing) ---
-        // If the parent is standalone, we create ONE service and put selected items in 'service_options'
+        const { data: profile, error: profileError } = await supabaseAdmin
+            .from('profiles')
+            .select('subscription_tier')
+            .eq('id', providerId)
+            .maybeSingle();
+
+        if (profileError) throw profileError;
+
+        const subscriptionTier = normalizeTier(profile?.subscription_tier);
+        const serviceLimit = SERVICE_LIMITS_BY_TIER[subscriptionTier] ?? SERVICE_LIMITS_BY_TIER.free;
+        const servicesToCreateCount = (parentCat && parentCat.is_standalone) ? 1 : selectedCats.length;
+
+        const { count: existingServicesCount, error: existingServicesError } = await supabaseAdmin
+            .from('services')
+            .select('id', { count: 'exact', head: true })
+            .eq('provider_id', providerId);
+
+        if (existingServicesError) throw existingServicesError;
+
+        const currentServicesCount = existingServicesCount || 0;
+        if (serviceLimit !== Infinity && (currentServicesCount + servicesToCreateCount) > serviceLimit) {
+            const upgradeTier = SERVICE_UPGRADE_TARGET[subscriptionTier] || 'Business';
+            return res.status(403).json({ error: `Upgrade to ${upgradeTier} to post more services.` });
+        }
+
         if (parentCat && parentCat.is_standalone) {
             
-            // Prepare options array: [{ name: 'Leak Repair', price: 0 }, ...]
             const options = selectedCats.map(c => ({
                 id: c.id,
                 name: c.name,
-                price: 0 // Default price, provider edits this later
+                price: 0
             }));
 
             const { data, error } = await supabase
                 .from('services')
                 .insert({
                     provider_id: providerId,
-                    category_id: parentCat.id, // Link to Parent (Plumbing)
+                    category_id: parentCat.id,
                     title: `${parentCat.name} Services`,
                     description: `Professional ${parentCat.name} services including ${options.map(o => o.name).join(', ')}.`,
-                    price: 0, // Base price 0, calculated from options later
+                    price: 0,
                     currency: currency,
                     image_urls: [],
-                    service_type: 'Home Service (HS)', // Default for standalone
+                    service_type: 'Home Service (HS)',
                     status: 'draft',
-                    service_options: options // <--- SAVE OPTIONS HERE
+                    service_options: options
                 })
                 .select();
 
@@ -112,8 +149,6 @@ router.post('/', authenticateToken, async (req, res) => {
             return res.status(201).json({ message: 'Standalone Service created!', services: data });
         }
 
-        // --- BRANCH B: STANDARD SERVICES (e.g. Relocation) ---
-        // Old logic: Create one service per selected category
         const servicesToInsert = selectedCats.map(cat => ({
             provider_id: providerId,
             category_id: cat.id, 
