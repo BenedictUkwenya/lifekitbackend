@@ -65,13 +65,37 @@ router.get('/:serviceId', async (req, res) => {
   try {
     const { data: reviews, error } = await supabase
       .from('reviews')
-      .select('*, profiles:reviewer_id(full_name, profile_picture_url)')
+      .select('*, profiles:reviewer_id(full_name, profile_picture_url), bookings:booking_id(status)')
       .eq('service_id', serviceId)
       .order('created_at', { ascending: false });
 
     if (error) throw error;
 
-    res.status(200).json({ reviews });
+    const ratingsBreakdown = {
+      5: 0,
+      4: 0,
+      3: 0,
+      2: 0,
+      1: 0
+    };
+
+    const mappedReviews = (reviews || []).map((review) => {
+      const ratingValue = Number(review.rating);
+      if (ratingsBreakdown[ratingValue] !== undefined) {
+        ratingsBreakdown[ratingValue] += 1;
+      }
+
+      return {
+        ...review,
+        verified: review.bookings?.status === 'completed',
+        bookings: undefined
+      };
+    });
+
+    res.status(200).json({
+      reviews: mappedReviews,
+      ratings_breakdown: ratingsBreakdown
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

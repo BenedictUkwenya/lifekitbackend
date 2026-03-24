@@ -19,14 +19,100 @@ router.get('/posts', authenticateToken, async (req, res) => {
 
     if (error) throw error;
 
-    const formatted = (data || []).map((p) => ({
+    const now = Date.now();
+    const oneDayMs = 24 * 60 * 60 * 1000;
+
+    const enriched = (data || []).map((p) => {
+      const createdAtMs = p.created_at ? new Date(p.created_at).getTime() : 0;
+      const ageMs = Math.max(0, now - createdAtMs);
+      const isRecent = ageMs <= oneDayMs;
+      const likes = Number(p.likes_count || 0);
+      const comments = Number(p.comments_count || 0);
+      const ageHours = Math.max(0, ageMs / (60 * 60 * 1000));
+      const freshnessBoost = Math.max(0, 24 - ageHours) * 0.1;
+      const trendingScore = isRecent
+        ? (comments * 3) + (likes * 2) + freshnessBoost
+        : -1;
+
+      return {
+        ...p,
+        _is_recent_trending: isRecent,
+        _trending_score: trendingScore
+      };
+    });
+
+    enriched.sort((a, b) => {
+      if (a._is_recent_trending && b._is_recent_trending) {
+        if (b._trending_score !== a._trending_score) {
+          return b._trending_score - a._trending_score;
+        }
+        return new Date(b.created_at) - new Date(a.created_at);
+      }
+
+      if (a._is_recent_trending && !b._is_recent_trending) return -1;
+      if (!a._is_recent_trending && b._is_recent_trending) return 1;
+
+      return new Date(b.created_at) - new Date(a.created_at);
+    });
+
+    const formatted = enriched.map((p) => ({
       ...p,
       is_liked_by_me: Array.isArray(p.post_likes)
         ? p.post_likes.some((l) => l.user_id === userId)
         : false,
+      _is_recent_trending: undefined,
+      _trending_score: undefined
     }));
 
     res.json(formatted);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.post('/posts/share-service/:serviceId', authenticateToken, async (req, res) => {
+  const { serviceId } = req.params;
+  const userId = req.user.id;
+
+  try {
+    const { data: service, error: serviceError } = await supabaseAdmin
+      .from('services')
+      .select('id, title, description, image_urls, price, currency, provider_id')
+      .eq('id', serviceId)
+      .eq('provider_id', userId)
+      .single();
+
+    if (serviceError || !service) {
+      return res.status(404).json({ error: 'Service not found for this provider.' });
+    }
+
+    const firstImage = Array.isArray(service.image_urls) && service.image_urls.length > 0
+      ? service.image_urls[0]
+      : null;
+
+    const currencySymbol = service.currency === 'NGN' ? '₦' : '$';
+    const shortDescription = (service.description || '').toString().trim();
+    const previewText = shortDescription.length > 120
+      ? `${shortDescription.substring(0, 117)}...`
+      : shortDescription;
+    const bookLink = `lifekit://service/${service.id}`;
+    const content = `${previewText || 'I just shared my service on LifeKit.'}\n\nBook Now: ${bookLink}`;
+
+    const { data: post, error: postError } = await supabaseAdmin
+      .from('posts')
+      .insert({
+        title: `${service.title} • ${currencySymbol}${service.price ?? 0}`,
+        content,
+        image_url: firstImage,
+        user_id: userId,
+        likes_count: 0,
+        comments_count: 0
+      })
+      .select()
+      .single();
+
+    if (postError) throw postError;
+    res.status(201).json(post);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
