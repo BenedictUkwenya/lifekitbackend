@@ -11,12 +11,6 @@ const COMMUNITY_LIMITS_BY_TIER = {
   business: Infinity
 };
 
-const COMMUNITY_UPGRADE_TARGET = {
-  free: 'Plus',
-  plus: 'Pro',
-  pro: 'Business'
-};
-
 const normalizeTier = (tier) => {
   if (!tier || typeof tier !== 'string') return 'free';
   return tier.toLowerCase();
@@ -33,7 +27,6 @@ const getCommunityLimitContext = async (userId) => {
 
   const subscriptionTier = normalizeTier(profile?.subscription_tier);
   const communityLimit = COMMUNITY_LIMITS_BY_TIER[subscriptionTier] ?? COMMUNITY_LIMITS_BY_TIER.free;
-  const upgradeTier = COMMUNITY_UPGRADE_TARGET[subscriptionTier] || 'Business';
 
   const { count: currentCommunityCount, error: countError } = await supabaseAdmin
     .from('group_members')
@@ -44,8 +37,7 @@ const getCommunityLimitContext = async (userId) => {
 
   return {
     communityLimit,
-    currentCommunityCount: currentCommunityCount || 0,
-    upgradeTier
+    currentCommunityCount: currentCommunityCount || 0
   };
 };
 
@@ -607,12 +599,11 @@ router.post('/groups', authenticateToken, async (req, res) => {
   try {
     const {
       communityLimit,
-      currentCommunityCount,
-      upgradeTier
+      currentCommunityCount
     } = await getCommunityLimitContext(userId);
 
     if (communityLimit !== Infinity && currentCommunityCount >= communityLimit) {
-      return res.status(403).json({ error: `Upgrade to ${upgradeTier} to join more communities.` });
+      return res.status(403).json({ error: 'Plan limit reached' });
     }
 
     const { data: group, error } = await supabaseAdmin
@@ -661,12 +652,11 @@ router.post('/groups/:id/join', authenticateToken, async (req, res) => {
 
     const {
       communityLimit,
-      currentCommunityCount,
-      upgradeTier
+      currentCommunityCount
     } = await getCommunityLimitContext(userId);
 
     if (communityLimit !== Infinity && currentCommunityCount >= communityLimit) {
-      return res.status(403).json({ error: `Upgrade to ${upgradeTier} to join more communities.` });
+      return res.status(403).json({ error: 'Plan limit reached' });
     }
 
     const { error } = await supabaseAdmin

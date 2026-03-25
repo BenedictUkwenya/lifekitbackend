@@ -11,15 +11,17 @@ const SERVICE_LIMITS_BY_TIER = {
     business: Infinity
 };
 
-const SERVICE_UPGRADE_TARGET = {
-    free: 'Plus',
-    plus: 'Pro',
-    pro: 'Business'
-};
-
 const normalizeTier = (tier) => {
     if (!tier || typeof tier !== 'string') return 'free';
     return tier.toLowerCase();
+};
+
+const getTierWeight = (tier) => {
+    const normalized = normalizeTier(tier);
+    if (normalized === 'business') return 4;
+    if (normalized === 'pro') return 3;
+    if (normalized === 'plus') return 2;
+    return 1;
 };
 
 // --- Service Listing & Management Endpoints ---
@@ -111,14 +113,14 @@ router.post('/', authenticateToken, async (req, res) => {
         const { count: existingServicesCount, error: existingServicesError } = await supabaseAdmin
             .from('services')
             .select('id', { count: 'exact', head: true })
-            .eq('provider_id', providerId);
+            .eq('provider_id', providerId)
+            .in('status', ['active', 'draft']);
 
         if (existingServicesError) throw existingServicesError;
 
         const currentServicesCount = existingServicesCount || 0;
         if (serviceLimit !== Infinity && (currentServicesCount + servicesToCreateCount) > serviceLimit) {
-            const upgradeTier = SERVICE_UPGRADE_TARGET[subscriptionTier] || 'Business';
-            return res.status(403).json({ error: `Upgrade to ${upgradeTier} to post more services.` });
+            return res.status(403).json({ error: 'Plan limit reached' });
         }
 
         if (parentCat && parentCat.is_standalone) {
@@ -346,21 +348,36 @@ router.get('/category/:categoryId', async (req, res) => {
             .select(`
                 *, 
                 profiles!provider_id (
+                    id,
                     full_name, 
-                    profile_picture_url
+                    profile_picture_url,
+                    subscription_tier
                 ), 
                 service_categories (name)
             `)
             .in('category_id', allCategoryIds) // Checks Child, Self, AND Parent
             .eq('status', 'active')
             .not('profiles', 'is', null)
-            .order('price', { ascending: true });
+            .limit(200);
 
         if (error) throw error;
 
+        const sortedServices = (services || []).sort((a, b) => {
+            const tierA = a?.profiles?.subscription_tier;
+            const tierB = b?.profiles?.subscription_tier;
+            const weightDiff = getTierWeight(tierB) - getTierWeight(tierA);
+            if (weightDiff !== 0) return weightDiff;
+
+            const ratingA = Number(a?.average_rating || 0);
+            const ratingB = Number(b?.average_rating || 0);
+            if (ratingB !== ratingA) return ratingB - ratingA;
+
+            return Number(b?.total_reviews || 0) - Number(a?.total_reviews || 0);
+        });
+
         res.status(200).json({
             message: 'Services fetched successfully!',
-            services: services, 
+            services: sortedServices, 
         });
 
     } catch (error) {

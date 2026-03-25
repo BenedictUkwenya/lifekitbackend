@@ -31,6 +31,8 @@ const BOOST_DURATION_MS = {
 const normalizeTier = (tier) => (typeof tier === 'string' ? tier.toLowerCase() : '');
 
 const roundMoney = (amount) => Number(Number(amount).toFixed(2));
+const getSubscriptionExpiryIso = () =>
+  new Date(Date.now() + (30 * 24 * 60 * 60 * 1000)).toISOString();
 
 const getWalletByUserId = async (userId) => {
   const { data: wallet, error } = await supabaseAdmin
@@ -112,7 +114,7 @@ router.post('/subscribe', authenticateToken, async (req, res) => {
       return res.status(402).json({ error: 'Insufficient wallet balance.' });
     }
 
-    const expiry = new Date(Date.now() + (30 * 24 * 60 * 60 * 1000)).toISOString();
+    const expiry = getSubscriptionExpiryIso();
 
     const { error: profileUpdateError } = await supabaseAdmin
       .from('profiles')

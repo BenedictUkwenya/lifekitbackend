@@ -4,6 +4,17 @@ const router = express.Router();
 const { supabase } = require('../config/supabase');
 const authenticateToken = require('../middleware/authMiddleware'); 
 
+const normalizeTier = (tier) =>
+  (typeof tier === 'string' ? tier.toLowerCase() : 'free');
+
+const getTierWeight = (tier) => {
+  const normalized = normalizeTier(tier);
+  if (normalized === 'business') return 4;
+  if (normalized === 'pro') return 3;
+  if (normalized === 'plus') return 2;
+  return 1;
+};
+
 // 1. Get Active Offers/Banners (Public)
 router.get('/offers', async (req, res) => {
   try {
@@ -31,34 +42,35 @@ router.get('/offers', async (req, res) => {
 // 2. Get Popular Services (Public & Dynamic)
 router.get('/popular-services', async (req, res) => {
   try {
-    // 1. Try to fetch the top 5 highest-rated active services
+    // 1. Fetch active services with provider subscription tier
     let { data: services, error } = await supabase
       .from('services')
-      .select('*, profiles(full_name, profile_picture_url), service_categories(name)')
+      .select(
+        '*, profiles(id, full_name, profile_picture_url, subscription_tier), service_categories(name)',
+      )
       .eq('status', 'active')
-      // Removed the hardcoded .eq('is_popular', true)
-      .order('average_rating', { ascending: false, nullsFirst: false })
-      .order('total_reviews', { ascending: false })
-      .limit(6);
+      .limit(120);
 
     if (error) throw error;
+    services = services || [];
 
-    // 2. Fallback for new apps: 
-    // If no services have ratings yet (or list is empty), just fetch the newest active ones!
-    if (!services || services.length === 0 || services[0].average_rating === 0) {
-      const { data: newestServices } = await supabase
-        .from('services')
-        .select('*, profiles(full_name, profile_picture_url), service_categories(name)')
-        .eq('status', 'active')
-        .order('created_at', { ascending: false })
-        .limit(6);
-        
-      services = newestServices || [];
-    }
+    // 2. Premium spotlight sorting: Business > Pro > Plus > Free, then rating desc
+    services.sort((a, b) => {
+      const tierA = a?.profiles?.subscription_tier;
+      const tierB = b?.profiles?.subscription_tier;
+      const weightDiff = getTierWeight(tierB) - getTierWeight(tierA);
+      if (weightDiff != 0) return weightDiff;
+
+      const ratingA = Number(a?.average_rating || 0);
+      const ratingB = Number(b?.average_rating || 0);
+      if (ratingB != ratingA) return ratingB - ratingA;
+
+      return Number(b?.total_reviews || 0) - Number(a?.total_reviews || 0);
+    });
 
     res.status(200).json({
       message: 'Popular services fetched successfully!',
-      services: services,
+      services: services.slice(0, 6),
     });
   } catch (error) {
     console.error('Popular Services Error:', error.message);
