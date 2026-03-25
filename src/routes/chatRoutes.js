@@ -3,6 +3,32 @@ const router = express.Router();
 const { supabaseAdmin } = require('../config/supabase'); // Using Admin to bypass RLS
 const authenticateToken = require('../middleware/authMiddleware');
 
+const STATUS_EVENT_MESSAGES = {
+  confirmed: 'Booking confirmed',
+  completed: 'Service marked as completed',
+  cancelled: 'Booking cancelled',
+  disputed: 'Booking moved to dispute review'
+};
+
+const insertSystemStatusMessage = async (bookingId, status) => {
+  const normalizedStatus = String(status || '').toLowerCase();
+  const content = STATUS_EVENT_MESSAGES[normalizedStatus];
+  if (!content || !bookingId) return;
+
+  const { error } = await supabaseAdmin
+    .from('messages')
+    .insert({
+      booking_id: bookingId,
+      sender_id: 'SYSTEM',
+      content,
+      is_read: false
+    });
+
+  if (error) {
+    throw error;
+  }
+};
+
 // =============================================================================
 // 1. GET /chats - Get List of Conversations (Grouped by User)
 // =============================================================================
@@ -10,8 +36,6 @@ router.get('/', authenticateToken, async (req, res) => {
   const userId = req.user.id;
 
   try {
-    // 1. Fetch all bookings involving the user
-    // Using supabaseAdmin ensures we get data even if RLS is strict
     const { data: bookings, error } = await supabaseAdmin
       .from('bookings')
       .select(`
@@ -25,35 +49,82 @@ router.get('/', authenticateToken, async (req, res) => {
 
     if (error) throw error;
 
-    // 2. GROUPING LOGIC
+    const bookingIds = (bookings || []).map((b) => b.id);
+    let messages = [];
+
+    if (bookingIds.length > 0) {
+      const { data: messageRows, error: messagesError } = await supabaseAdmin
+        .from('messages')
+        .select('booking_id, sender_id, content, is_read, created_at')
+        .in('booking_id', bookingIds)
+        .order('created_at', { ascending: false });
+
+      if (messagesError) throw messagesError;
+      messages = messageRows || [];
+    }
+
+    const messagesByBooking = new Map();
+    messages.forEach((message) => {
+      if (!messagesByBooking.has(message.booking_id)) {
+        messagesByBooking.set(message.booking_id, []);
+      }
+      messagesByBooking.get(message.booking_id).push(message);
+    });
+
     const conversationsMap = new Map();
+    const activeStatuses = new Set(['pending', 'confirmed', 'disputed']);
 
     bookings.forEach(booking => {
-      // Determine who the "Other User" is
       let otherUser;
       if (booking.client_id === userId) {
-        otherUser = booking.provider; // I am client -> chat is with provider
+        otherUser = booking.provider;
       } else {
-        otherUser = booking.client;   // I am provider -> chat is with client
+        otherUser = booking.client;
       }
 
-      if (!otherUser) return; // Skip if profile missing
+      if (!otherUser) return;
 
       const otherUserId = otherUser.id;
+      const bookingMessages = messagesByBooking.get(booking.id) || [];
+      const unreadForBooking = bookingMessages.filter(
+        (msg) => msg.sender_id !== userId && msg.is_read === false
+      ).length;
+      const newestMessage = bookingMessages.length > 0 ? bookingMessages[0] : null;
+      const status = String(booking.status || '').toLowerCase();
 
-      // Initialize conversation entry if not exists
       if (!conversationsMap.has(otherUserId)) {
         conversationsMap.set(otherUserId, {
           other_user: otherUser,
-          bookings: []
+          bookings: [],
+          unread_count: 0,
+          last_message: null,
+          last_message_time: null,
+          is_active: false
         });
       }
 
-      // Add this booking to the specific user's conversation list
-      conversationsMap.get(otherUserId).bookings.push(booking);
+      const conversation = conversationsMap.get(otherUserId);
+      conversation.bookings.push(booking);
+      conversation.unread_count += unreadForBooking;
+      if (activeStatuses.has(status)) {
+        conversation.is_active = true;
+      }
+
+      if (newestMessage) {
+        const currentLastTime = conversation.last_message_time
+          ? new Date(conversation.last_message_time).getTime()
+          : 0;
+        const newestTime = newestMessage.created_at
+          ? new Date(newestMessage.created_at).getTime()
+          : 0;
+
+        if (!conversation.last_message_time || newestTime > currentLastTime) {
+          conversation.last_message = newestMessage.content || '';
+          conversation.last_message_time = newestMessage.created_at;
+        }
+      }
     });
 
-    // Convert Map to Array
     const conversations = Array.from(conversationsMap.values());
 
     res.status(200).json({ conversations });
@@ -65,7 +136,44 @@ router.get('/', authenticateToken, async (req, res) => {
 });
 
 // =============================================================================
-// 2. GET /chats/:bookingId - Get Messages for a specific Booking
+// 2. PUT /chats/:bookingId/read - Mark conversation messages as read
+// =============================================================================
+router.put('/:bookingId/read', authenticateToken, async (req, res) => {
+  const { bookingId } = req.params;
+  const userId = req.user.id;
+
+  try {
+    const { data: booking, error: bookingError } = await supabaseAdmin
+      .from('bookings')
+      .select('id, client_id, provider_id')
+      .eq('id', bookingId)
+      .maybeSingle();
+
+    if (bookingError) throw bookingError;
+    if (!booking) return res.status(404).json({ error: 'Booking not found' });
+
+    if (booking.client_id !== userId && booking.provider_id !== userId) {
+      return res.status(403).json({ error: 'Unauthorized access to this conversation' });
+    }
+
+    const { error: updateError } = await supabaseAdmin
+      .from('messages')
+      .update({ is_read: true })
+      .eq('booking_id', bookingId)
+      .neq('sender_id', userId)
+      .eq('is_read', false);
+
+    if (updateError) throw updateError;
+
+    res.status(200).json({ message: 'Messages marked as read' });
+  } catch (error) {
+    console.error('Mark chat as read error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =============================================================================
+// 3. GET /chats/:bookingId - Get Messages for a specific Booking
 // =============================================================================
 router.get('/:bookingId', authenticateToken, async (req, res) => {
   const { bookingId } = req.params;
@@ -88,7 +196,7 @@ router.get('/:bookingId', authenticateToken, async (req, res) => {
 });
 
 // =============================================================================
-// 3. POST /chats/message - Send Message & Notify (With Status Check)
+// 4. POST /chats/message - Send Message & Notify (With Status Check)
 // =============================================================================
 router.post('/message', authenticateToken, async (req, res) => {
   const { booking_id, content } = req.body;
@@ -146,4 +254,5 @@ router.post('/message', authenticateToken, async (req, res) => {
   }
 });
 
+router.insertSystemStatusMessage = insertSystemStatusMessage;
 module.exports = router;

@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { supabase, supabaseAdmin } = require('../config/supabase');
 const authenticateToken = require('../middleware/authMiddleware');
+const chatRoutes = require('./chatRoutes');
 
 // Base route: /bookings
 
@@ -146,6 +147,8 @@ router.post('/:id/dispute', authenticateToken, async (req, res) => {
       return res.status(500).json({ error: 'Failed to update booking status.' });
     }
 
+    await chatRoutes.insertSystemStatusMessage(id, 'disputed');
+
     const { data: dispute, error: disputeError } = await supabaseAdmin
       .from('disputes')
       .insert({
@@ -212,6 +215,8 @@ router.put('/:id/status', authenticateToken, async (req, res) => {
 
     if (error) return res.status(500).json({ error: 'Failed to update status.' });
 
+    await chatRoutes.insertSystemStatusMessage(id, status);
+
     if (status === 'cancelled') {
         const { data: clientWallet } = await supabaseAdmin.from('wallets').select('*').eq('user_id', booking.client_id).single();
         const refundBalance = parseFloat(clientWallet.balance) + parseFloat(booking.total_price);
@@ -275,6 +280,7 @@ router.put('/:id/complete', authenticateToken, async (req, res) => {
 
     if (updatedBooking.client_confirmed && updatedBooking.provider_confirmed) {
         await supabaseAdmin.from('bookings').update({ status: 'completed' }).eq('id', id);
+        await chatRoutes.insertSystemStatusMessage(id, 'completed');
 
         if (booking.total_price > 0) {
             const { data: providerWallet } = await supabaseAdmin.from('wallets').select('*').eq('user_id', booking.provider_id).single();

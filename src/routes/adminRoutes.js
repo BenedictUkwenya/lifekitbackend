@@ -3,6 +3,7 @@ const router = express.Router();
 // CRITICAL: Import supabaseAdmin to bypass RLS for Admin views
 const { supabaseAdmin } = require('../config/supabase'); 
 const authenticateAdmin = require('../middleware/adminMiddleware');
+const chatRoutes = require('./chatRoutes');
 // ADDED: subMonths and format are needed for the charts
 const { startOfMonth, startOfWeek, startOfYear, subMonths, format } = require('date-fns');
 
@@ -561,6 +562,8 @@ router.post('/disputes/:id/resolve', async (req, res) => {
         return res.status(500).json({ error: 'Failed to update booking status.' });
       }
 
+      await chatRoutes.insertSystemStatusMessage(booking.id, 'cancelled');
+
       if (booking.total_price > 0) {
         const { data: clientWallet } = await supabaseAdmin
           .from('wallets')
@@ -588,6 +591,8 @@ router.post('/disputes/:id/resolve', async (req, res) => {
       if (bookingUpdateError) {
         return res.status(500).json({ error: 'Failed to update booking status.' });
       }
+
+      await chatRoutes.insertSystemStatusMessage(booking.id, 'completed');
 
       if (booking.total_price > 0) {
         const { data: providerWallet } = await supabaseAdmin
