@@ -79,8 +79,8 @@ const deductWallet = async (userId, amount) => {
 const recordPurchaseTransaction = async (walletId, amount, description) => {
   const { error } = await supabaseAdmin.from('transactions').insert({
     wallet_id: walletId,
-    type: 'purchase',
-    amount,
+    type: 'payment',
+    amount: roundMoney(Math.abs(Number(amount || 0))),
     status: 'success',
     description
   });
