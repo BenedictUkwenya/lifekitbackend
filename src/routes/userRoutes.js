@@ -265,7 +265,20 @@ router.get('/counts', authenticateToken, async (req, res) => {
         if (!chatError) chatCount = count;
     }
 
-    res.status(200).json({ notifications: notifCount || 0, chats: chatCount || 0 });
+    const { count: activeBookingsCount, error: activeBookingsError } =
+        await supabaseAdmin
+          .from('bookings')
+          .select('*', { count: 'exact', head: true })
+          .or(`client_id.eq.${userId},provider_id.eq.${userId}`)
+          .in('status', ['pending', 'confirmed']);
+
+    if (activeBookingsError) throw activeBookingsError;
+
+    res.status(200).json({
+      notifications: notifCount || 0,
+      chats: chatCount || 0,
+      active_bookings: activeBookingsCount || 0,
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -275,7 +288,7 @@ router.get('/counts', authenticateToken, async (req, res) => {
 router.put('/notifications/read-all', authenticateToken, async (req, res) => {
   const userId = req.user.id;
   try {
-    const { error } = await supabase
+    const { error } = await supabaseAdmin
       .from('notifications')
       .update({ is_read: true })
       .eq('user_id', userId)
@@ -294,7 +307,7 @@ router.delete('/notifications/:id', authenticateToken, async (req, res) => {
   const userId = req.user.id;
 
   try {
-    const { error } = await supabase
+    const { error } = await supabaseAdmin
       .from('notifications')
       .delete()
       .eq('id', id)
