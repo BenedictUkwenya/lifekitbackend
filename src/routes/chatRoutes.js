@@ -72,7 +72,7 @@ router.get('/', authenticateToken, async (req, res) => {
     });
 
     const conversationsMap = new Map();
-    const activeStatuses = new Set(['pending', 'confirmed', 'disputed']);
+    const activeStatuses = new Set(['pending', 'confirmed', 'overdue', 'disputed']);
 
     bookings.forEach(booking => {
       let otherUser;
@@ -214,7 +214,10 @@ router.post('/message', authenticateToken, async (req, res) => {
 
     // 2. SECURITY CHECK: Is the booking active?
     // Prevent messaging if the service is already finished or cancelled
-    if (booking.status === 'completed' || booking.status === 'cancelled') {
+    const normalizedStatus = String(booking.status || '').toLowerCase();
+    const closedStatuses = new Set(['completed', 'cancelled']);
+
+    if (closedStatuses.has(normalizedStatus)) {
       return res.status(403).json({ error: "This conversation is closed because the service is finished." });
     }
 

@@ -4,6 +4,84 @@ const { supabase, supabaseAdmin } = require('../config/supabase');
 const authenticateToken = require('../middleware/authMiddleware');
 const chatRoutes = require('./chatRoutes');
 
+const isBookingOverdue = (booking, now = new Date()) => {
+  const normalizedStatus = String(booking?.status || '').toLowerCase();
+  if (normalizedStatus !== 'confirmed' || !booking?.scheduled_time) return false;
+
+  const scheduledAt = new Date(booking.scheduled_time);
+  if (Number.isNaN(scheduledAt.getTime())) return false;
+
+  return scheduledAt.getTime() < now.getTime();
+};
+
+const appendVirtualOverdueStatus = (bookings = [], now = new Date()) =>
+  bookings.map((booking) => ({
+    ...booking,
+    is_overdue: isBookingOverdue(booking, now)
+  }));
+
+const sendOverdueNudgesIfNeeded = async (bookings = []) => {
+  const overdueBookings = bookings.filter((booking) => booking.is_overdue);
+  if (overdueBookings.length === 0) return;
+
+  const overdueBookingIds = overdueBookings.map((booking) => booking.id);
+  const { data: existingNotifications, error: existingNotificationsError } = await supabaseAdmin
+    .from('notifications')
+    .select('reference_id, user_id')
+    .eq('type', 'booking_overdue_nudge')
+    .in('reference_id', overdueBookingIds);
+
+  if (existingNotificationsError) {
+    throw existingNotificationsError;
+  }
+
+  const sentNotificationKeys = new Set(
+    (existingNotifications || []).map(
+      (notification) => `${notification.reference_id}:${notification.user_id}`
+    )
+  );
+
+  const notificationsToInsert = [];
+
+  overdueBookings.forEach((booking) => {
+    const serviceTitle = booking?.services?.title || 'Service';
+    const providerKey = `${booking.id}:${booking.provider_id}`;
+    const clientKey = `${booking.id}:${booking.client_id}`;
+
+    if (!sentNotificationKeys.has(providerKey)) {
+      notificationsToInsert.push({
+        user_id: booking.provider_id,
+        title: 'Booking Overdue ⚠️',
+        message: `⚠️ Deadline Missed! Is the work for "${serviceTitle}" done? Confirm now to release your funds.`,
+        type: 'booking_overdue_nudge',
+        reference_id: booking.id,
+        is_read: false
+      });
+    }
+
+    if (!sentNotificationKeys.has(clientKey)) {
+      notificationsToInsert.push({
+        user_id: booking.client_id,
+        title: 'Booking Overdue ⚠️',
+        message: `⚠️ Job Overdue? Your service for "${serviceTitle}" was scheduled for yesterday. Did it happen? Confirm receipt or Report an Issue.`,
+        type: 'booking_overdue_nudge',
+        reference_id: booking.id,
+        is_read: false
+      });
+    }
+  });
+
+  if (notificationsToInsert.length > 0) {
+    const { error: insertNotificationError } = await supabaseAdmin
+      .from('notifications')
+      .insert(notificationsToInsert);
+
+    if (insertNotificationError) {
+      throw insertNotificationError;
+    }
+  }
+};
+
 // Base route: /bookings
 
 /**
@@ -326,7 +404,17 @@ router.get('/client', authenticateToken, async (req, res) => {
       .order('created_at', { ascending: false });
 
     if (error) return res.status(400).json({ error: error.message });
-    res.status(200).json({ bookings });
+
+    const now = new Date();
+    const bookingsWithOverdueStatus = appendVirtualOverdueStatus(bookings || [], now);
+
+    try {
+      await sendOverdueNudgesIfNeeded(bookingsWithOverdueStatus);
+    } catch (nudgeError) {
+      console.error('Overdue nudge error:', nudgeError.message);
+    }
+
+    res.status(200).json({ bookings: bookingsWithOverdueStatus });
   } catch (e) { 
     res.status(500).json({ error: e.message }); 
   }
@@ -342,7 +430,17 @@ router.get('/provider', authenticateToken, async (req, res) => {
       .order('created_at', { ascending: false });
 
     if (error) return res.status(400).json({ error: error.message });
-    res.status(200).json({ requests });
+
+    const now = new Date();
+    const requestsWithOverdueStatus = appendVirtualOverdueStatus(requests || [], now);
+
+    try {
+      await sendOverdueNudgesIfNeeded(requestsWithOverdueStatus);
+    } catch (nudgeError) {
+      console.error('Overdue nudge error:', nudgeError.message);
+    }
+
+    res.status(200).json({ requests: requestsWithOverdueStatus });
   } catch (e) { 
     res.status(500).json({ error: e.message }); 
   }

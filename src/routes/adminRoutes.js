@@ -11,6 +11,13 @@ const { startOfMonth, startOfWeek, startOfYear, subMonths, format } = require('d
 router.use(authenticateAdmin);
 
 const COMMISSION_RATE = 0.08; // 8% commission
+const isOverdueBooking = (booking, now = new Date()) => {
+  const normalizedStatus = String(booking?.status || '').toLowerCase();
+  if (normalizedStatus !== 'confirmed' || !booking?.scheduled_time) return false;
+  const scheduledAt = new Date(booking.scheduled_time);
+  if (Number.isNaN(scheduledAt.getTime())) return false;
+  return scheduledAt.getTime() < now.getTime();
+};
 
 /**
  * =========================================================================
@@ -291,8 +298,72 @@ router.get('/bookings/all', async (req, res) => {
       .limit(10);
 
     if (error) throw error;
-    res.json(data);
+    const now = new Date();
+    const bookings = (data || []).map((booking) => ({
+      ...booking,
+      is_overdue: isOverdueBooking(booking, now)
+    }));
+
+    const overdueJobs = bookings.filter((booking) => booking.is_overdue).length;
+    res.json({
+      bookings,
+      stats: {
+        overdue_jobs: overdueJobs
+      }
+    });
   } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /admin/bookings/:id/nudge
+router.post('/bookings/:id/nudge', async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const { data: booking, error: bookingError } = await supabaseAdmin
+      .from('bookings')
+      .select('id, status, scheduled_time, client_id, provider_id, services(title)')
+      .eq('id', id)
+      .single();
+
+    if (bookingError || !booking) {
+      return res.status(404).json({ error: 'Booking not found.' });
+    }
+
+    if (!isOverdueBooking(booking)) {
+      return res.status(400).json({ error: 'Nudge is only available for overdue confirmed bookings.' });
+    }
+
+    const serviceTitle = booking?.services?.title || 'Service';
+    const notifications = [
+      {
+        user_id: booking.provider_id,
+        title: '🚨 Admin Urgent Nudge',
+        message: `Admin Alert: "${serviceTitle}" is overdue. Please provide an immediate status update and confirm completion if done.`,
+        type: 'admin_overdue_nudge',
+        reference_id: booking.id,
+        is_read: false
+      },
+      {
+        user_id: booking.client_id,
+        title: '🚨 Admin Urgent Nudge',
+        message: `Admin Alert: "${serviceTitle}" is overdue. Please confirm completion or report an issue so funds remain protected.`,
+        type: 'admin_overdue_nudge',
+        reference_id: booking.id,
+        is_read: false
+      }
+    ];
+
+    const { error: notifyError } = await supabaseAdmin
+      .from('notifications')
+      .insert(notifications);
+
+    if (notifyError) throw notifyError;
+
+    res.status(200).json({ message: 'High-priority nudge sent to both client and provider.' });
+  } catch (error) {
+    console.error('Admin nudge error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
