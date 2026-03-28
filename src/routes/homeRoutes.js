@@ -77,6 +77,60 @@ router.get('/popular-services', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+router.get('/explore', async (req, res) => {
+  try {
+    const [
+      featuredProvidersResult,
+      categoriesResult,
+      servicesResult,
+    ] = await Promise.all([
+      supabase
+        .from('profiles')
+        .select('id, full_name, profile_picture_url, subscription_tier')
+        .in('subscription_tier', ['business', 'pro']),
+      supabase
+        .from('service_categories')
+        .select('*')
+        .is('parent_category_id', null)
+        .order('name', { ascending: true }),
+      supabase
+        .from('services')
+        .select(
+          '*, profiles(id, full_name, profile_picture_url, subscription_tier), service_categories(name)',
+        )
+        .eq('status', 'active')
+        .limit(200),
+    ]);
+
+    if (featuredProvidersResult.error) throw featuredProvidersResult.error;
+    if (categoriesResult.error) throw categoriesResult.error;
+    if (servicesResult.error) throw servicesResult.error;
+
+    const featuredProviders = featuredProvidersResult.data || [];
+    const categories = categoriesResult.data || [];
+    let services = servicesResult.data || [];
+
+    services.sort((a, b) => {
+      const tierA = a?.profiles?.subscription_tier;
+      const tierB = b?.profiles?.subscription_tier;
+      const weightDiff = getTierWeight(tierB) - getTierWeight(tierA);
+      if (weightDiff !== 0) return weightDiff;
+      const ratingA = Number(a?.average_rating || 0);
+      const ratingB = Number(b?.average_rating || 0);
+      return ratingB - ratingA;
+    });
+
+    res.status(200).json({
+      message: 'Explore feed fetched successfully!',
+      featured_providers: featuredProviders,
+      categories: categories,
+      all_services: services,
+    });
+  } catch (error) {
+    console.error('Explore Error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
 // 3. Get ROOT Service Categories (Main Page)
 // This only returns categories that DO NOT have a parent.
 router.get('/categories', async (req, res) => {

@@ -5,7 +5,7 @@ async function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1]; // Expects format: Bearer [token]
 
-  if (token == null) {
+  if (!token || token === 'null' || token === 'undefined') {
     return res.status(401).json({ error: 'Authentication token required.' });
   }
 
