@@ -107,19 +107,24 @@ router.post('/', authenticateToken, async (req, res) => {
         if (profileError) throw profileError;
 
         const subscriptionTier = normalizeTier(profile?.subscription_tier);
-        const serviceLimit = SERVICE_LIMITS_BY_TIER[subscriptionTier] ?? SERVICE_LIMITS_BY_TIER.free;
         const servicesToCreateCount = (parentCat && parentCat.is_standalone) ? 1 : selectedCats.length;
 
         const { count: existingServicesCount, error: existingServicesError } = await supabaseAdmin
             .from('services')
             .select('id', { count: 'exact', head: true })
-            .eq('provider_id', providerId)
-            .in('status', ['active', 'draft']);
+            .eq('provider_id', providerId);
 
         if (existingServicesError) throw existingServicesError;
 
         const currentServicesCount = existingServicesCount || 0;
-        if (serviceLimit !== Infinity && (currentServicesCount + servicesToCreateCount) > serviceLimit) {
+        if (subscriptionTier === 'plus' && (currentServicesCount + servicesToCreateCount) > 1) {
+            return res.status(403).json({ error: 'Plan limit reached' });
+        }
+        if (subscriptionTier === 'pro' && (currentServicesCount + servicesToCreateCount) > 5) {
+            return res.status(403).json({ error: 'Plan limit reached' });
+        }
+        const serviceLimit = SERVICE_LIMITS_BY_TIER[subscriptionTier] ?? SERVICE_LIMITS_BY_TIER.free;
+        if (subscriptionTier !== 'plus' && subscriptionTier !== 'pro' && serviceLimit !== Infinity && (currentServicesCount + servicesToCreateCount) > serviceLimit) {
             return res.status(403).json({ error: 'Plan limit reached' });
         }
 
@@ -213,16 +218,47 @@ router.put('/:id', authenticateToken, async (req, res) => {
     }
 
     try {
-        // 2. Update the Service Table
-        const { data, error } = await supabase
+        const { data: existingService, error: existingServiceError } = await supabase
             .from('services')
-            .update(updateData)
+            .select('*')
             .eq('id', id)
             .eq('provider_id', providerId)
-            .select()
-            .single();
+            .maybeSingle();
 
-        if (error) throw error;
+        if (existingServiceError) throw existingServiceError;
+        if (!existingService) {
+            return res.status(404).json({ error: 'Service not found or not owned by user.' });
+        }
+
+        const hasServiceFieldUpdates = Object.keys(updateData).length > 0;
+        const statusOnlyUpdate = hasServiceFieldUpdates && Object.keys(updateData).every((key) => key === 'status');
+        const shouldCountEdit = hasServiceFieldUpdates && !statusOnlyUpdate;
+
+        if (shouldCountEdit && (existingService.edit_count || 0) >= 2) {
+            return res.status(403).json({
+                error: 'You have reached the maximum edit limit (2) for this service. Please contact support for further changes.'
+            });
+        }
+
+        if (shouldCountEdit) {
+            updateData.edit_count = (existingService.edit_count || 0) + 1;
+        }
+
+        const shouldUpdateServiceTable = hasServiceFieldUpdates;
+        // 2. Update the Service Table
+        let data = existingService;
+        if (shouldUpdateServiceTable) {
+            const { data: updatedData, error } = await supabase
+                .from('services')
+                .update(updateData)
+                .eq('id', id)
+                .eq('provider_id', providerId)
+                .select()
+                .single();
+
+            if (error) throw error;
+            data = updatedData;
+        }
 
         // 3. Update Availability (Provider Schedules)
         // If the frontend sent an availability array, we save it to the separate table
@@ -278,18 +314,20 @@ router.delete('/:id', authenticateToken, async (req, res) => {
     const providerId = req.user.id;
 
     try {
-        const { error } = await supabase
+        const { data: deletedService, error } = await supabase
             .from('services')
             .delete()
             .eq('id', id)
-            .eq('provider_id', providerId); // Ensure user can only delete their own services
+            .eq('provider_id', providerId)
+            .select('id')
+            .maybeSingle();
 
         if (error) {
-            if (error.code === 'PGRST116') { 
-                return res.status(404).json({ error: 'Service not found or not owned by user.' });
-            }
             console.error('Supabase delete service error:', error.message);
             return res.status(400).json({ error: error.message });
+        }
+        if (!deletedService) {
+            return res.status(404).json({ error: 'Service not found or not owned by user.' });
         }
 
         res.status(200).json({
