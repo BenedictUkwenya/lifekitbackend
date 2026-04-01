@@ -274,6 +274,170 @@ router.get('/counts', authenticateToken, async (req, res) => {
 
     if (activeBookingsError) throw activeBookingsError;
 
+    // ── Lazy ghosted-escrow auto-release (48-hour rule) ───────────────────
+    // Runs fire-and-forget so a failure never blocks the count response.
+    (async () => {
+      try {
+        const now    = new Date();
+        const cutoff = new Date(now.getTime() - 48 * 60 * 60 * 1000);
+
+        // Find bookings where the provider confirmed but the client ghosted
+        // and the window has elapsed.
+        const { data: ghostedBookings } = await supabaseAdmin
+          .from('bookings')
+          .select('id, client_id, provider_id, total_price, services(title)')
+          .or(`client_id.eq.${userId},provider_id.eq.${userId}`)
+          .eq('provider_confirmed', true)
+          .eq('client_confirmed', false)
+          .in('status', ['confirmed', 'pending'])
+          .lte('updated_at', cutoff.toISOString());
+
+        if (!ghostedBookings || ghostedBookings.length === 0) return;
+
+        for (const booking of ghostedBookings) {
+          try {
+            const serviceTitle = booking.services?.title || 'Service';
+
+            // 1. Mark booking as completed
+            await supabaseAdmin
+              .from('bookings')
+              .update({ status: 'completed', updated_at: new Date().toISOString() })
+              .eq('id', booking.id);
+
+            // 2. Transfer funds to provider's wallet (only if price > 0)
+            if (parseFloat(booking.total_price) > 0) {
+              const { data: providerWallet } = await supabaseAdmin
+                .from('wallets')
+                .select('id, balance')
+                .eq('user_id', booking.provider_id)
+                .single();
+
+              if (providerWallet) {
+                const newBalance =
+                  parseFloat(providerWallet.balance) +
+                  parseFloat(booking.total_price);
+                await supabaseAdmin
+                  .from('wallets')
+                  .update({ balance: newBalance })
+                  .eq('id', providerWallet.id);
+
+                await supabaseAdmin.from('transactions').insert({
+                  wallet_id: providerWallet.id,
+                  type: 'earning',
+                  amount: booking.total_price,
+                  status: 'success',
+                  description: `Auto-released funds for Booking #${booking.id} (client inactive 48h)`,
+                });
+              }
+            }
+
+            // 3. Notify both parties
+            await supabaseAdmin.from('notifications').insert([
+              {
+                user_id: booking.provider_id,
+                title: 'Funds Auto-Released 💰',
+                message: `Your funds for "${serviceTitle}" were automatically released. The client did not respond within 48 hours.`,
+                type: 'auto_release',
+                reference_id: booking.id,
+                is_read: false,
+              },
+              {
+                user_id: booking.client_id,
+                title: 'Booking Auto-Completed',
+                message: `Your booking for "${serviceTitle}" was automatically marked as completed. The provider confirmed 48+ hours ago.`,
+                type: 'auto_release',
+                reference_id: booking.id,
+                is_read: false,
+              },
+            ]);
+          } catch (singleErr) {
+            console.error(
+              `Auto-release failed for booking ${booking.id}:`,
+              singleErr.message
+            );
+          }
+        }
+      } catch (escrowErr) {
+        console.error('Ghosted escrow check error:', escrowErr.message);
+      }
+    })();
+    // ── End ghosted-escrow auto-release ───────────────────────────────────
+
+    // ── Lazy proactive reminders ───────────────────────────────────────────
+    // Run fire-and-forget so reminder failures never block the count response.
+    (async () => {
+      try {
+        const now = new Date();
+        const h2  = new Date(now.getTime() + 2  * 60 * 60 * 1000);
+        const h24 = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+        const h48 = new Date(now.getTime() + 48 * 60 * 60 * 1000);
+
+        // Fetch all confirmed bookings for this user in the 0-48 h window.
+        const { data: upcomingBookings } = await supabaseAdmin
+          .from('bookings')
+          .select('id, scheduled_time, client_id, provider_id, services(title)')
+          .or(`client_id.eq.${userId},provider_id.eq.${userId}`)
+          .eq('status', 'confirmed')
+          .gte('scheduled_time', now.toISOString())
+          .lte('scheduled_time', h48.toISOString());
+
+        if (!upcomingBookings || upcomingBookings.length === 0) return;
+
+        // Determine which reminder type each booking needs.
+        const candidates = upcomingBookings.map((b) => {
+          const t = new Date(b.scheduled_time);
+          let type;
+          if (t <= h2)        type = 'reminder_2h';
+          else if (t <= h24)  type = 'reminder_24h';
+          else                type = 'reminder_48h';
+
+          const labels = {
+            reminder_2h:  'Service in less than 2 hours!',
+            reminder_24h: 'Service reminder: Tomorrow',
+            reminder_48h: 'Upcoming service in 2 days',
+          };
+          return { booking: b, type, message: labels[type] };
+        });
+
+        // Check which (booking_id, type) combos already have a notification.
+        const bookingIds  = candidates.map(c => c.booking.id);
+        const reminderTypes = ['reminder_2h', 'reminder_24h', 'reminder_48h'];
+
+        const { data: existing } = await supabaseAdmin
+          .from('notifications')
+          .select('reference_id, type')
+          .in('reference_id', bookingIds)
+          .in('type', reminderTypes)
+          .eq('user_id', userId);
+
+        const sentKeys = new Set(
+          (existing || []).map(n => `${n.reference_id}:${n.type}`)
+        );
+
+        const toInsert = candidates
+          .filter(c => !sentKeys.has(`${c.booking.id}:${c.type}`))
+          .map(c => ({
+            user_id:      userId,
+            title:        c.type === 'reminder_2h'
+                            ? '⏰ Service Starting Soon!'
+                            : c.type === 'reminder_24h'
+                              ? '📅 Service Tomorrow'
+                              : '🗓️ Upcoming Service',
+            message:      `${c.message}: "${c.booking.services?.title || 'Service'}"`,
+            type:         c.type,
+            reference_id: c.booking.id,
+            is_read:      false,
+          }));
+
+        if (toInsert.length > 0) {
+          await supabaseAdmin.from('notifications').insert(toInsert);
+        }
+      } catch (reminderErr) {
+        console.error('Reminder nudge error:', reminderErr.message);
+      }
+    })();
+    // ── End lazy reminders ─────────────────────────────────────────────────
+
     res.status(200).json({
       notifications: notifCount || 0,
       chats: chatCount || 0,

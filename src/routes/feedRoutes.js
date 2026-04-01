@@ -37,7 +37,8 @@ const getCommunityLimitContext = async (userId) => {
 
   return {
     communityLimit,
-    currentCommunityCount: currentCommunityCount || 0
+    currentCommunityCount: currentCommunityCount || 0,
+    subscriptionTier,
   };
 };
 
@@ -549,18 +550,22 @@ const isContentSafe = (text) => {
 // 1. GET ALL GROUPS (With member counts)
 router.get('/groups', async (req, res) => {
   try {
-    const { data, error } = await supabase
+    // supabaseAdmin bypasses RLS so the profiles join works for all callers,
+    // including unauthenticated requests from the app's group discovery screen.
+    const { data, error } = await supabaseAdmin
       .from('groups')
       .select(`
         *,
-        members_count: group_members(count)
+        members_count: group_members(count),
+        creator: profiles!creator_id(subscription_tier, full_name)
       `);
 
     if (error) throw error;
 
     const formattedGroups = data.map(g => ({
       ...g,
-      members_count: g.members_count[0]?.count || 0
+      members_count: g.members_count[0]?.count || 0,
+      creator_tier: (g.creator?.subscription_tier || 'free').toLowerCase(),
     }));
 
     res.json(formattedGroups);
@@ -599,11 +604,17 @@ router.post('/groups', authenticateToken, async (req, res) => {
   try {
     const {
       communityLimit,
-      currentCommunityCount
+      currentCommunityCount,
+      subscriptionTier,
     } = await getCommunityLimitContext(userId);
 
     if (communityLimit !== Infinity && currentCommunityCount >= communityLimit) {
-      return res.status(403).json({ error: 'Plan limit reached' });
+      return res.status(403).json({
+        error: 'Plan limit reached',
+        code: 'PLAN_LIMIT_REACHED',
+        current_tier: subscriptionTier,
+        limit: communityLimit,
+      });
     }
 
     const { data: group, error } = await supabaseAdmin
@@ -652,11 +663,17 @@ router.post('/groups/:id/join', authenticateToken, async (req, res) => {
 
     const {
       communityLimit,
-      currentCommunityCount
+      currentCommunityCount,
+      subscriptionTier,
     } = await getCommunityLimitContext(userId);
 
     if (communityLimit !== Infinity && currentCommunityCount >= communityLimit) {
-      return res.status(403).json({ error: 'Plan limit reached' });
+      return res.status(403).json({
+        error: 'Plan limit reached',
+        code: 'PLAN_LIMIT_REACHED',
+        current_tier: subscriptionTier,
+        limit: communityLimit,
+      });
     }
 
     const { error } = await supabaseAdmin
@@ -685,7 +702,7 @@ router.get('/groups/:id/posts', authenticateToken, async (req, res) => {
       .from('group_posts')
       .select(`
         *,
-        profiles (full_name, profile_picture_url, username),
+        profiles (full_name, profile_picture_url, username, subscription_tier),
         group_post_likes (user_id),
         parent: parent_id (
           id,

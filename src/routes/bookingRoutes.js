@@ -89,7 +89,6 @@ const sendOverdueNudgesIfNeeded = async (bookings = []) => {
  * Logic: Check Balance -> Deduct Money (Hold) -> Create Booking -> Notify Provider
  */
 router.post('/', authenticateToken, async (req, res) => {
-  // 1. Added service_type and comments to destructuring
   const { service_id, scheduled_time, location_details, total_price, service_type, comments } = req.body;
   const clientId = req.user.id;
 
@@ -97,8 +96,10 @@ router.post('/', authenticateToken, async (req, res) => {
     return res.status(400).json({ error: 'Service ID, scheduled time, and price are required.' });
   }
 
+  let walletId = null;
+  let deducted = false;
+
   try {
-    // 2. Verify Service & Get Provider ID
     const { data: service, error: serviceError } = await supabaseAdmin 
       .from('services')
       .select('provider_id, price, title') 
@@ -106,31 +107,38 @@ router.post('/', authenticateToken, async (req, res) => {
       .single();
 
     if (serviceError || !service) {
-      return res.status(404).json({ error: 'Service not found or not currently active.' });
+      return res.status(404).json({ error: 'Service not found.' });
     }
 
-    // 3. Check Client Wallet Balance
-    const { data: clientWallet } = await supabaseAdmin
+    const { data: clientWallet, error: walletFetchError } = await supabaseAdmin
       .from('wallets')
-      .select('*')
+      .select('id, balance')
       .eq('user_id', clientId)
       .single();
 
-    if (!clientWallet || parseFloat(clientWallet.balance) < parseFloat(total_price)) {
-      return res.status(402).json({ error: 'Insufficient wallet balance. Please add money.' });
+    if (walletFetchError || !clientWallet || parseFloat(clientWallet.balance) < parseFloat(total_price)) {
+      return res.status(402).json({ error: 'Insufficient wallet balance.' });
     }
 
-    // 4. DEDUCT MONEY (Hold Funds)
+    walletId = clientWallet.id;
     const newBalance = parseFloat(clientWallet.balance) - parseFloat(total_price);
     
-    const { error: walletError } = await supabaseAdmin
+    const { error: walletUpdateError } = await supabaseAdmin
       .from('wallets')
       .update({ balance: newBalance })
-      .eq('id', clientWallet.id);
+      .eq('id', walletId);
 
-    if (walletError) return res.status(500).json({ error: 'Payment processing failed.' });
+    if (walletUpdateError) throw new Error('Failed to deduct funds.');
+    deducted = true;
 
-    // 5. Create Booking (Including the new service_type and comments fields)
+    await supabaseAdmin.from('transactions').insert({
+      wallet_id: walletId,
+      type: 'hold',
+      amount: total_price,
+      status: 'success',
+      description: `Funds held for booking service: ${service.title}`
+    });
+
     const { data: booking, error: bookingError } = await supabaseAdmin
       .from('bookings')
       .insert({
@@ -140,8 +148,8 @@ router.post('/', authenticateToken, async (req, res) => {
         scheduled_time,
         location_details,
         total_price,
-        service_type, // <--- New field added
-        comments,     // <--- New field added
+        service_type,
+        comments,
         status: 'pending',
         client_confirmed: false, 
         provider_confirmed: false 
@@ -150,30 +158,39 @@ router.post('/', authenticateToken, async (req, res) => {
       .single();
 
     if (bookingError) {
-      // Refund logic if booking fails
-      const refundBalance = parseFloat(clientWallet.balance); // total_price was already deducted
-      await supabaseAdmin.from('wallets').update({ balance: refundBalance }).eq('id', clientWallet.id);
-      return res.status(500).json({ error: 'Failed to create booking.' });
+      console.error('Booking insert failed:', bookingError);
+      throw new Error('Failed to create booking record.');
     }
-
-    // 6. NOTIFY THE PROVIDER
-    const isSkillSwap = parseFloat(total_price) === 0;
 
     await supabaseAdmin.from('notifications').insert({
       user_id: service.provider_id,
-      title: isSkillSwap ? 'New Skill Swap Request 🔄' : 'New Booking Request 📅',
-      message: isSkillSwap 
-        ? `Someone wants to swap skills with you for "${service.title}". Check requests!` 
-        : `Someone wants to book "${service.title}" for $${total_price}.`,
+      title: parseFloat(total_price) === 0 ? 'New Skill Swap Request 🔄' : 'New Booking Request 📅',
+      message: `Someone wants to book "${service.title}".`,
       type: 'booking_request', 
       reference_id: booking.id,
       is_read: false
     });
 
-    res.status(201).json({ message: 'Booking request sent and funds held successfully.', booking });
+    res.status(201).json({ message: 'Booking request sent.', booking });
 
   } catch (error) {
-    console.error('Unexpected booking error:', error.message);
+    console.error('Booking flow error:', error.message);
+    
+    if (deducted && walletId) {
+      try {
+        const { data: w } = await supabaseAdmin.from('wallets').select('balance').eq('id', walletId).single();
+        await supabaseAdmin.from('wallets').update({ balance: parseFloat(w.balance) + parseFloat(total_price) }).eq('id', walletId);
+        await supabaseAdmin.from('transactions').insert({
+          wallet_id: walletId,
+          type: 'refund',
+          amount: total_price,
+          status: 'success',
+          description: 'Automatic rollback refund'
+        });
+      } catch (rollbackError) {
+        console.error('Critical: Rollback failed', rollbackError);
+      }
+    }
     res.status(500).json({ error: 'Internal server error.' });
   }
 });
@@ -345,9 +362,15 @@ router.put('/:id/complete', authenticateToken, async (req, res) => {
     if (!booking) return res.status(404).json({ error: 'Booking not found.' });
 
     let updateData = {};
-    if (userId === booking.client_id) updateData = { client_confirmed: true };
-    else if (userId === booking.provider_id) updateData = { provider_confirmed: true };
-    else return res.status(403).json({ error: 'Unauthorized action.' });
+    // updated_at is stamped here so the 48-hour ghosted-escrow timer starts
+    // the moment a party confirms (not when the booking was originally created).
+    if (userId === booking.client_id) {
+      updateData = { client_confirmed: true, updated_at: new Date().toISOString() };
+    } else if (userId === booking.provider_id) {
+      updateData = { provider_confirmed: true, updated_at: new Date().toISOString() };
+    } else {
+      return res.status(403).json({ error: 'Unauthorized action.' });
+    }
 
     const { data: updatedBooking } = await supabaseAdmin
       .from('bookings')
@@ -399,7 +422,7 @@ router.get('/client', authenticateToken, async (req, res) => {
   try {
     const { data: bookings, error } = await supabaseAdmin 
       .from('bookings')
-      .select('*, services(title, image_urls), profiles!provider_id(full_name)')
+      .select('*, services(title, image_urls), profiles!provider_id(id, full_name, profile_picture_url)')
       .eq('client_id', clientId)
       .order('created_at', { ascending: false });
 
@@ -425,7 +448,7 @@ router.get('/provider', authenticateToken, async (req, res) => {
   try {
     const { data: requests, error } = await supabaseAdmin 
       .from('bookings')
-      .select('*, services(title), profiles!client_id(full_name, profile_picture_url)') 
+      .select('*, services(title, image_urls), profiles!client_id(id, full_name, profile_picture_url)')
       .eq('provider_id', providerId)
       .order('created_at', { ascending: false });
 

@@ -19,9 +19,9 @@ const insertSystemStatusMessage = async (bookingId, status) => {
     .from('messages')
     .insert({
       booking_id: bookingId,
-      sender_id: 'SYSTEM',
+      sender_id: null, // null = system-generated message
       content,
-      is_read: false
+      is_read: true      // system pills don't need read receipts
     });
 
   if (error) {

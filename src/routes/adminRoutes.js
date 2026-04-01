@@ -575,23 +575,61 @@ router.get('/reports', async (req, res) => {
 });
 
 // GET /admin/disputes
+// Source of truth is the bookings table (status = 'disputed').
+// We left-join the disputes table to get the reason/initiator if a record exists.
+// This ensures no disputed booking is ever invisible to the admin.
 router.get('/disputes', async (req, res) => {
   try {
-    const { data, error } = await supabaseAdmin
-      .from('disputes')
-      .select('*, bookings(*), profiles:initiator_id(email, full_name)')
-      .order('created_at', { ascending: false });
+    // 1. All bookings currently in 'disputed' state
+    const { data: disputedBookings, error: bookingsError } = await supabaseAdmin
+      .from('bookings')
+      .select(`
+        *,
+        services(title),
+        client:profiles!client_id(full_name, email, profile_picture_url),
+        provider:profiles!provider_id(full_name, email, profile_picture_url)
+      `)
+      .eq('status', 'disputed')
+      .order('updated_at', { ascending: false });
 
-    if (error) throw error;
-    res.json(data);
+    if (bookingsError) throw bookingsError;
+    if (!disputedBookings || disputedBookings.length === 0) return res.json([]);
+
+    // 2. Fetch matching dispute records (reason, initiator) for those bookings
+    const bookingIds = disputedBookings.map(b => b.id);
+    const { data: disputeRecords } = await supabaseAdmin
+      .from('disputes')
+      .select('*, initiator:initiator_id(full_name, email)')
+      .in('booking_id', bookingIds);
+
+    const disputeByBookingId = {};
+    (disputeRecords || []).forEach(d => { disputeByBookingId[d.booking_id] = d; });
+
+    // 3. Merge: every disputed booking is present; dispute data enriches it when available
+    const result = disputedBookings.map(booking => {
+      const dispute = disputeByBookingId[booking.id] || null;
+      return {
+        booking_id:     booking.id,
+        dispute_id:     dispute?.id || null,
+        reason:         dispute?.reason || null,
+        dispute_status: dispute?.status || 'open',
+        initiator:      dispute?.initiator || null,
+        created_at:     dispute?.created_at || booking.updated_at,
+        bookings:       booking,
+      };
+    });
+
+    res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// POST /admin/disputes/:id/resolve
-router.post('/disputes/:id/resolve', async (req, res) => {
-  const { id } = req.params;
+// POST /admin/disputes/:bookingId/resolve
+// Resolves a disputed booking by booking_id. Works whether or not a dispute
+// record exists in the disputes table.
+router.post('/disputes/:bookingId/resolve', async (req, res) => {
+  const { bookingId } = req.params;
   const { verdict } = req.body;
 
   if (!['refund_client', 'pay_provider'].includes(verdict)) {
@@ -599,103 +637,88 @@ router.post('/disputes/:id/resolve', async (req, res) => {
   }
 
   try {
-    const { data: dispute, error: disputeError } = await supabaseAdmin
-      .from('disputes')
-      .select('*')
-      .eq('id', id)
-      .single();
-
-    if (disputeError || !dispute) {
-      return res.status(404).json({ error: 'Dispute not found.' });
-    }
-
-    if (dispute.status === 'resolved') {
-      return res.status(400).json({ error: 'Dispute already resolved.' });
-    }
-
     const { data: booking, error: bookingError } = await supabaseAdmin
       .from('bookings')
       .select('*')
-      .eq('id', dispute.booking_id)
+      .eq('id', bookingId)
       .single();
 
     if (bookingError || !booking) {
       return res.status(404).json({ error: 'Booking not found.' });
     }
 
+    // Find the dispute record if one exists (not mandatory)
+    const { data: dispute } = await supabaseAdmin
+      .from('disputes')
+      .select('id, status')
+      .eq('booking_id', bookingId)
+      .maybeSingle();
+
+    if (dispute && dispute.status === 'resolved') {
+      return res.status(400).json({ error: 'Dispute already resolved.' });
+    }
+
     if (verdict === 'refund_client') {
-      const { error: bookingUpdateError } = await supabaseAdmin
-        .from('bookings')
-        .update({ status: 'cancelled' })
-        .eq('id', booking.id);
-
-      if (bookingUpdateError) {
-        return res.status(500).json({ error: 'Failed to update booking status.' });
-      }
-
-      await chatRoutes.insertSystemStatusMessage(booking.id, 'cancelled');
+      await supabaseAdmin.from('bookings').update({ status: 'cancelled' }).eq('id', bookingId);
+      await chatRoutes.insertSystemStatusMessage(bookingId, 'cancelled');
 
       if (booking.total_price > 0) {
         const { data: clientWallet } = await supabaseAdmin
-          .from('wallets')
-          .select('*')
-          .eq('user_id', booking.client_id)
-          .single();
-
+          .from('wallets').select('*').eq('user_id', booking.client_id).single();
         const refundBalance = parseFloat(clientWallet.balance) + parseFloat(booking.total_price);
         await supabaseAdmin.from('wallets').update({ balance: refundBalance }).eq('id', clientWallet.id);
-
         await supabaseAdmin.from('transactions').insert({
-          wallet_id: clientWallet.id,
-          type: 'refund',
-          amount: booking.total_price,
-          status: 'success',
-          description: `Admin refund for Booking #${booking.id}`
+          wallet_id: clientWallet.id, type: 'refund', amount: booking.total_price,
+          status: 'success', description: `Admin refund for Booking #${bookingId}`
         });
       }
     } else {
-      const { error: bookingUpdateError } = await supabaseAdmin
-        .from('bookings')
-        .update({ status: 'completed' })
-        .eq('id', booking.id);
-
-      if (bookingUpdateError) {
-        return res.status(500).json({ error: 'Failed to update booking status.' });
-      }
-
-      await chatRoutes.insertSystemStatusMessage(booking.id, 'completed');
+      await supabaseAdmin.from('bookings').update({ status: 'completed' }).eq('id', bookingId);
+      await chatRoutes.insertSystemStatusMessage(bookingId, 'completed');
 
       if (booking.total_price > 0) {
         const { data: providerWallet } = await supabaseAdmin
-          .from('wallets')
-          .select('*')
-          .eq('user_id', booking.provider_id)
-          .single();
-
+          .from('wallets').select('*').eq('user_id', booking.provider_id).single();
         const newBalance = parseFloat(providerWallet.balance) + parseFloat(booking.total_price);
         await supabaseAdmin.from('wallets').update({ balance: newBalance }).eq('id', providerWallet.id);
-
         await supabaseAdmin.from('transactions').insert({
-          wallet_id: providerWallet.id,
-          type: 'earning',
-          amount: booking.total_price,
-          status: 'success',
-          description: `Admin payout for Booking #${booking.id}`
+          wallet_id: providerWallet.id, type: 'earning', amount: booking.total_price,
+          status: 'success', description: `Admin payout for Booking #${bookingId}`
         });
       }
     }
 
-    const { data: resolvedDispute, error: resolveError } = await supabaseAdmin
-      .from('disputes')
-      .update({ status: 'resolved', admin_verdict: verdict })
-      .eq('id', id)
-      .select()
-      .single();
+    // Mark the dispute record as resolved if one exists
+    if (dispute) {
+      await supabaseAdmin
+        .from('disputes')
+        .update({ status: 'resolved', admin_verdict: verdict })
+        .eq('id', dispute.id);
+    }
 
-    if (resolveError) throw resolveError;
+    // Notify both parties
+    await supabaseAdmin.from('notifications').insert([
+      {
+        user_id: booking.client_id,
+        title: verdict === 'refund_client' ? 'Dispute Resolved: Refunded 💸' : 'Dispute Resolved',
+        message: verdict === 'refund_client'
+          ? 'Admin resolved the dispute. Your funds have been refunded to your wallet.'
+          : 'Admin resolved the dispute in favor of the provider.',
+        type: 'dispute_resolved', reference_id: bookingId, is_read: false,
+      },
+      {
+        user_id: booking.provider_id,
+        title: verdict === 'pay_provider' ? 'Dispute Resolved: Paid 💰' : 'Dispute Resolved',
+        message: verdict === 'pay_provider'
+          ? 'Admin resolved the dispute. Funds have been released to your wallet.'
+          : 'Admin resolved the dispute in favor of the client.',
+        type: 'dispute_resolved', reference_id: bookingId, is_read: false,
+      },
+    ]);
 
-    res.json({ dispute: resolvedDispute });
+    res.json({ message: `Dispute resolved: ${verdict}`, booking_id: bookingId });
   } catch (error) {
+    console.error('Dispute resolve error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
