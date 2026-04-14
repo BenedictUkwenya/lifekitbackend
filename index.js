@@ -20,6 +20,7 @@ const chatRoutes = require('./src/routes/chatRoutes');
 const upgradeRoutes = require('./src/routes/upgradeRoutes');
 
 const reviewRoutes = require('./src/routes/reviewRoutes');
+const aiRoutes = require('./src/routes/aiRoutes');
 // ...
 
 
@@ -57,6 +58,7 @@ app.use('/feeds', feedRoutes);
 app.use('/chats', chatRoutes); 
 app.use('/reviews', reviewRoutes);
 app.use('/upgrades', upgradeRoutes);
+app.use('/ai', aiRoutes);
 
 
 // --- SERVER STARTUP (Modified for Vercel) ---
