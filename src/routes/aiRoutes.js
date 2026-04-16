@@ -9,10 +9,10 @@ console.log("DEBUG: Gemini API Key loaded:", !!process.env.GEMINI_API_KEY);
 
 // Fallback model cascade — tried in order until one succeeds
 const FALLBACK_MODELS = [
-  'gemini-3.1-flash-lite-preview',
-  'gemini-2.5-flash',
-  'gemini-flash-lite-latest',
   'gemini-flash-latest',
+  'gemini-flash-lite-latest',
+  'gemini-2.5-flash',
+  'gemini-3.1-flash-lite-preview',
 ];
 
 // DEBUG: List all available Gemini models at startup via REST API

@@ -31,7 +31,7 @@ const authenticateToken = require('../middleware/authMiddleware');
  */
 router.post('/signup', async (req, res) => {
   // 1. Deconstruct inputs
-  let { email, password, confirm_password, full_name } = req.body;
+  let { email, password, confirm_password, full_name, is_provider_signup, is_web_signup } = req.body;
 
   // --- SANITIZATION ---
   if (email) {
@@ -100,13 +100,23 @@ router.post('/signup', async (req, res) => {
     // Manually create/update the profile row immediately using Admin privileges.
     // This ensures the row exists in 'public.profiles' with the required full_name.
     if (data.user) {
+        // Early-adopter strategy: web provider signups get Pro tier free for 1 year
+        const isEarlyAdopterProvider = is_provider_signup === true && is_web_signup === true;
+
+        const profilePayload = {
+            id: data.user.id,
+            email: email,
+            full_name: full_name,
+            is_service_provider: isEarlyAdopterProvider ? true : false,
+            subscription_tier: isEarlyAdopterProvider ? 'pro' : 'free',
+            ...(isEarlyAdopterProvider && {
+                subscription_expiry: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
+            }),
+        };
+
         const { error: profileError } = await supabaseAdmin
             .from('profiles')
-            .upsert({
-                id: data.user.id,
-                email: email,
-                full_name: full_name // Satisfies Not-Null constraints in the DB
-            });
+            .upsert(profilePayload);
             
         if (profileError) {
             // Log a warning but don't fail the request (Database Trigger might have already handled it)
