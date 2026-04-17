@@ -29,20 +29,25 @@ const app = express();
 
 // --- IMPORTANT: CORS CONFIGURATION ---
 const allowedOrigins = [
-  'http://localhost:5173',   // Local dev (Vite default)
-  'http://localhost:3000',   // Local dev (alternate port)
-  'https://lifekit-sigma.vercel.app', // Provider web (production)
+  'https://lifekithub.com',
+  'https://www.lifekithub.com',
+  'https://admin.lifekithub.com',
+  'http://localhost:5173',
+  'http://localhost:5174'
 ];
 
 app.use(cors({
-  origin: (origin, callback) => {
-    // Allow requests with no origin (mobile apps, Postman, curl)
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like Mobile apps and cURL)
     if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) return callback(null, true);
-    callback(new Error(`CORS: origin '${origin}' not allowed`));
+    if (allowedOrigins.indexOf(origin) === -1) {
+      var msg = 'The CORS policy for this site does not allow access from the specified Origin.';
+      return callback(new Error(msg), false);
+    }
+    return callback(null, true);
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
 // Middleware for JSON
