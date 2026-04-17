@@ -21,17 +21,28 @@ const upgradeRoutes = require('./src/routes/upgradeRoutes');
 
 const reviewRoutes = require('./src/routes/reviewRoutes');
 const aiRoutes = require('./src/routes/aiRoutes');
+const swapRoutes = require('./src/routes/swapRoutes');
 // ...
 
 
 const app = express();
 
 // --- IMPORTANT: CORS CONFIGURATION ---
-// This allows your React App (on port 5173) to talk to this Backend
+const allowedOrigins = [
+  'http://localhost:5173',   // Local dev (Vite default)
+  'http://localhost:3000',   // Local dev (alternate port)
+  'https://lifekit-sigma.vercel.app', // Provider web (production)
+];
+
 app.use(cors({
-  origin: '*', // Allow ALL origins (Easiest for development)
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, Postman, curl)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    callback(new Error(`CORS: origin '${origin}' not allowed`));
+  },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
 // Middleware for JSON
@@ -59,6 +70,7 @@ app.use('/chats', chatRoutes);
 app.use('/reviews', reviewRoutes);
 app.use('/upgrades', upgradeRoutes);
 app.use('/ai', aiRoutes);
+app.use('/swap-requests', swapRoutes);
 
 
 // --- SERVER STARTUP (Modified for Vercel) ---

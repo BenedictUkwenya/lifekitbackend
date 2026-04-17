@@ -570,4 +570,96 @@ Do not include markdown, code fences, or any explanation outside the JSON object
   }
 });
 
+// ── POST /ai/skill-swap-matches ─────────────────────────────────────────────
+// AI Bi-directional Skill Swap Matcher
+// Body: { my_service_id, target_category_id }
+// Returns candidates ranked by AI with a match_reason and match_score (0-100)
+router.post('/skill-swap-matches', authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  const { my_service_id, target_category_id } = req.body;
+
+  if (!my_service_id || !target_category_id) {
+    return res.status(400).json({ error: 'my_service_id and target_category_id are required.' });
+  }
+
+  try {
+    // 1. Fetch my offered service
+    const { data: myService, error: myErr } = await supabaseAdmin
+      .from('services')
+      .select('id, title, description, price, sub_category_id')
+      .eq('id', my_service_id)
+      .eq('provider_id', userId)
+      .single();
+
+    if (myErr || !myService) {
+      return res.status(404).json({ error: 'Your service was not found.' });
+    }
+
+    // 2. Fetch all active services in the target category (exclude self)
+    const { data: candidates, error: candErr } = await supabaseAdmin
+      .from('services')
+      .select('id, title, description, price, provider_id, image_urls, average_rating, profiles(id, full_name, profile_picture_url, bio)')
+      .eq('sub_category_id', target_category_id)
+      .eq('status', 'active')
+      .neq('provider_id', userId)
+      .limit(20);
+
+    if (candErr) throw candErr;
+
+    if (!candidates || candidates.length === 0) {
+      return res.status(200).json({ matches: [] });
+    }
+
+    // 3. Ask AI to rank and score the candidates
+    const systemPrompt = `You are a Skill Swap matching engine for the LifeKit service marketplace.
+Your job is to rank a list of candidate services against the user's offered skill and return a JSON array.
+For each candidate, provide a match_score (0-100) where 100 means perfect complementary match, and a short match_reason (1 sentence).
+Consider: complementarity, price parity, and skill relevance.
+Return ONLY a JSON array in this exact format — no markdown, no extra text:
+[
+  { "service_id": "uuid", "match_score": number, "match_reason": "string" },
+  ...
+]`;
+
+    const userPrompt = `My offered service:
+Title: ${myService.title}
+Description: ${myService.description || 'N/A'}
+Price: $${myService.price}
+
+Candidate services I could receive in exchange:
+${candidates.map((c, i) => `${i + 1}. [${c.id}] "${c.title}" — ${c.description || 'No description'} — $${c.price}`).join('\n')}
+
+Rank all candidates from most to least suitable for a skill swap.`;
+
+    const rawText = await generateWithFallback(systemPrompt, userPrompt);
+    const jsonText = stripJsonFences(rawText);
+
+    let rankingArray;
+    try {
+      rankingArray = JSON.parse(jsonText);
+      if (!Array.isArray(rankingArray)) throw new Error('Not an array');
+    } catch {
+      // Fallback: return candidates unranked
+      rankingArray = candidates.map((c) => ({ service_id: c.id, match_score: 50, match_reason: 'Potential match' }));
+    }
+
+    // 4. Merge AI rankings back into candidate objects
+    const scoreMap = {};
+    rankingArray.forEach(r => { scoreMap[r.service_id] = r; });
+
+    const ranked = candidates
+      .map(c => ({
+        ...c,
+        match_score: scoreMap[c.id]?.match_score ?? 50,
+        match_reason: scoreMap[c.id]?.match_reason ?? 'Potential match',
+      }))
+      .sort((a, b) => b.match_score - a.match_score);
+
+    return res.status(200).json({ matches: ranked });
+  } catch (err) {
+    console.error('POST /ai/skill-swap-matches error:', err);
+    return res.status(500).json({ error: 'Failed to fetch AI matches.' });
+  }
+});
+
 module.exports = router;
