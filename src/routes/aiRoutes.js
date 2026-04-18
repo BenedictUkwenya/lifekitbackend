@@ -7,6 +7,38 @@ const { supabaseAdmin } = require('../config/supabase');
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 console.log("DEBUG: Gemini API Key loaded:", !!process.env.GEMINI_API_KEY);
 
+// ── Middleware: Premium AI gate ─────────────────────────────────────────────
+// Requires subscription_tier = 'pro' or 'business'. Must run after authenticateToken.
+async function requirePremiumAI(req, res, next) {
+  try {
+    const { data: profile, error } = await supabaseAdmin
+      .from('profiles')
+      .select('subscription_tier')
+      .eq('id', req.user.id)
+      .single();
+
+    if (error || !profile) {
+      return res.status(403).json({
+        error: 'Could not verify subscription.',
+        requires_upgrade: true,
+      });
+    }
+
+    const tier = (profile.subscription_tier || '').toLowerCase();
+    if (tier !== 'pro' && tier !== 'business') {
+      return res.status(403).json({
+        error: 'AI features require a Pro or Business subscription.',
+        requires_upgrade: true,
+      });
+    }
+
+    next();
+  } catch (err) {
+    console.error('requirePremiumAI error:', err);
+    return res.status(500).json({ error: 'Failed to verify subscription.' });
+  }
+}
+
 // Fallback model cascade — tried in order until one succeeds
 const FALLBACK_MODELS = [
   'gemini-flash-latest',
@@ -50,8 +82,8 @@ const SYSTEM_PROMPT = `You are an AI assistant for the LifeKit app. A user wants
 Do not include any explanation, markdown, or extra text outside the JSON object.`;
 
 // POST /ai/generate-service
-// Protected: requires a valid JWT
-router.post('/generate-service', authenticateToken, async (req, res) => {
+// Protected: requires Pro or Business subscription
+router.post('/generate-service', authenticateToken, requirePremiumAI, async (req, res) => {
   const { prompt } = req.body;
 
   if (!prompt || typeof prompt !== 'string' || prompt.trim().length === 0) {
@@ -145,7 +177,7 @@ async function generateWithFallback(systemInstruction, userPrompt, history = [])
 // ── POST /ai/chat ──────────────────────────────────────────────────────────
 // Module 2.1 — LifeKit AI Assistant (core chat engine)
 // Body: { message: string, history?: Array<{ role: 'user'|'model', text: string }> }
-router.post('/chat', authenticateToken, async (req, res) => {
+router.post('/chat', authenticateToken, requirePremiumAI, async (req, res) => {
   const { message, history } = req.body;
 
   if (!message || typeof message !== 'string' || message.trim().length === 0) {
@@ -324,7 +356,7 @@ Do not include any explanation, markdown, or extra text outside the JSON object.
 // ── GET /ai/opportunities ──────────────────────────────────────────────────
 // Module 2.3 — AI Opportunity Engine
 // Returns AI-identified market gaps based on the user's skills vs. platform trends.
-router.get('/opportunities', authenticateToken, async (req, res) => {
+router.get('/opportunities', authenticateToken, requirePremiumAI, async (req, res) => {
   const userId = req.user.id; // set by authenticateToken middleware
 
   try {
@@ -407,7 +439,7 @@ Return between 3 and 6 opportunities. Do not include any explanation, markdown, 
 // ── GET /ai/discovery ──────────────────────────────────────────────────────
 // Module 2.5 & 2.6 — Daily Discovery & Personalised Recommendations
 // Returns 3 AI-curated items (event, service, or community) tailored to the user.
-router.get('/discovery', authenticateToken, async (req, res) => {
+router.get('/discovery', authenticateToken, requirePremiumAI, async (req, res) => {
   const userId = req.user.id;
 
   try {
@@ -574,7 +606,7 @@ Do not include markdown, code fences, or any explanation outside the JSON object
 // AI Bi-directional Skill Swap Matcher
 // Body: { my_service_id, target_category_id }
 // Returns candidates ranked by AI with a match_reason and match_score (0-100)
-router.post('/skill-swap-matches', authenticateToken, async (req, res) => {
+router.post('/skill-swap-matches', authenticateToken, requirePremiumAI, async (req, res) => {
   const userId = req.user.id;
   const { my_service_id, target_category_id } = req.body;
 
@@ -659,6 +691,41 @@ Rank all candidates from most to least suitable for a skill swap.`;
   } catch (err) {
     console.error('POST /ai/skill-swap-matches error:', err);
     return res.status(500).json({ error: 'Failed to fetch AI matches.' });
+  }
+});
+
+// ── POST /ai/generate-swap-proposal ──────────────────────────────────────
+// AI Swap Proposal Generator — Pro/Business only
+// Body: { my_service_title, target_service_title, target_user_name }
+router.post('/generate-swap-proposal', authenticateToken, requirePremiumAI, async (req, res) => {
+  const { my_service_title, target_service_title, target_user_name } = req.body;
+
+  if (
+    !my_service_title || typeof my_service_title !== 'string' ||
+    !target_service_title || typeof target_service_title !== 'string' ||
+    !target_user_name || typeof target_user_name !== 'string'
+  ) {
+    return res.status(400).json({
+      error: 'my_service_title, target_service_title, and target_user_name are required strings.',
+    });
+  }
+
+  const myTitle = my_service_title.trim().slice(0, 100);
+  const targetTitle = target_service_title.trim().slice(0, 100);
+  const targetName = target_user_name.trim().slice(0, 60);
+
+  if (!myTitle || !targetTitle || !targetName) {
+    return res.status(400).json({ error: 'All fields must be non-empty strings.' });
+  }
+
+  const prompt = `Write a friendly, professional, 2-sentence direct message proposing a skill swap. I am offering "${myTitle}" and I want their "${targetTitle}". Address it to ${targetName}. Keep it casual but persuasive. Return ONLY the message text — no subject line, no labels, no quotes around the message.`;
+
+  try {
+    const text = await generateWithFallback(null, prompt);
+    return res.status(200).json({ proposal: text.trim() });
+  } catch (err) {
+    console.error('POST /ai/generate-swap-proposal error:', err);
+    return res.status(500).json({ error: 'Failed to generate proposal. Please try again.' });
   }
 });
 

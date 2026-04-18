@@ -66,7 +66,7 @@ router.get('/my-services', authenticateToken, async (req, res) => {
  * If Standard (e.g. Cleaning), create MULTIPLE services.
  */
 router.post('/', authenticateToken, async (req, res) => {
-    const { category_ids, currency = 'USD' } = req.body; 
+    const { category_ids, currency = 'USD', is_skill_swap_available = true } = req.body; 
     const providerId = req.user.id; 
 
     if (!Array.isArray(category_ids) || category_ids.length === 0) {
@@ -148,7 +148,8 @@ router.post('/', authenticateToken, async (req, res) => {
                     image_urls: [],
                     service_type: 'Home Service (HS)',
                     status: 'draft',
-                    service_options: options
+                    service_options: options,
+                    is_skill_swap_available: is_skill_swap_available
                 })
                 .select();
 
@@ -165,7 +166,8 @@ router.post('/', authenticateToken, async (req, res) => {
             currency: currency,
             image_urls: [], 
             service_type: 'Default',
-            status: 'draft'
+            status: 'draft',
+            is_skill_swap_available: is_skill_swap_available
         }));
 
         const { data, error } = await supabase.from('services').insert(servicesToInsert).select(); 
@@ -193,7 +195,8 @@ router.put('/:id', authenticateToken, async (req, res) => {
         image_urls, location_text, latitude, longitude, 
         category_id, status, service_type, pricing_type,
         service_options, // <--- Added for Standalone
-        availability 
+        availability,
+        is_skill_swap_available
     } = req.body;
 
     const updateData = {};
@@ -211,7 +214,8 @@ router.put('/:id', authenticateToken, async (req, res) => {
     if (pricing_type !== undefined) updateData.pricing_type = pricing_type;
     
     // Map service_options to updateData
-    if (service_options !== undefined) updateData.service_options = service_options; 
+    if (service_options !== undefined) updateData.service_options = service_options;
+    if (is_skill_swap_available !== undefined) updateData.is_skill_swap_available = is_skill_swap_available;
 
     if (status === 'active' || status === 'pending') {
         updateData.status = 'pending'; 
