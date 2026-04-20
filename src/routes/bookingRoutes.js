@@ -384,16 +384,28 @@ router.put('/:id/complete', authenticateToken, async (req, res) => {
         await chatRoutes.insertSystemStatusMessage(id, 'completed');
 
         if (booking.total_price > 0) {
+            // Fetch provider's trial status to determine commission rate
+            const { data: providerProfile } = await supabaseAdmin
+                .from('profiles')
+                .select('trial_end_date')
+                .eq('id', booking.provider_id)
+                .single();
+
+            const isTrialActive = providerProfile?.trial_end_date &&
+                new Date(providerProfile.trial_end_date) > new Date();
+            const commissionRate = isTrialActive ? 0.03 : 0.08;
+            const earnings = parseFloat((parseFloat(booking.total_price) * (1 - commissionRate)).toFixed(2));
+
             const { data: providerWallet } = await supabaseAdmin.from('wallets').select('*').eq('user_id', booking.provider_id).single();
-            const newBalance = parseFloat(providerWallet.balance) + parseFloat(booking.total_price);
+            const newBalance = parseFloat(providerWallet.balance) + earnings;
             await supabaseAdmin.from('wallets').update({ balance: newBalance }).eq('id', providerWallet.id);
             
             await supabaseAdmin.from('transactions').insert({
                 wallet_id: providerWallet.id,
                 type: 'earning',
-                amount: booking.total_price,
+                amount: earnings,
                 status: 'success',
-                description: `Earning from Booking #${id}`
+                description: `Earning from Booking #${id} (Commission: ${commissionRate * 100}%)`
             });
         }
 

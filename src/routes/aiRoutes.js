@@ -8,12 +8,13 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 console.log("DEBUG: Gemini API Key loaded:", !!process.env.GEMINI_API_KEY);
 
 // ── Middleware: Premium AI gate ─────────────────────────────────────────────
-// Requires subscription_tier = 'pro' or 'business'. Must run after authenticateToken.
+// Allows: pro, business, OR any tier with an active trial_end_date.
+// Must run after authenticateToken.
 async function requirePremiumAI(req, res, next) {
   try {
     const { data: profile, error } = await supabaseAdmin
       .from('profiles')
-      .select('subscription_tier')
+      .select('subscription_tier, trial_end_date')
       .eq('id', req.user.id)
       .single();
 
@@ -25,14 +26,17 @@ async function requirePremiumAI(req, res, next) {
     }
 
     const tier = (profile.subscription_tier || '').toLowerCase();
-    if (tier !== 'pro' && tier !== 'business') {
-      return res.status(403).json({
-        error: 'AI features require a Pro or Business subscription.',
-        requires_upgrade: true,
-      });
+    const isTrialActive =
+      profile.trial_end_date && new Date(profile.trial_end_date) > new Date();
+
+    if (tier === 'pro' || tier === 'business' || isTrialActive) {
+      return next();
     }
 
-    next();
+    return res.status(403).json({
+      error: 'AI features require a Pro or Business subscription.',
+      requires_upgrade: true,
+    });
   } catch (err) {
     console.error('requirePremiumAI error:', err);
     return res.status(500).json({ error: 'Failed to verify subscription.' });
@@ -363,7 +367,7 @@ router.get('/opportunities', authenticateToken, requirePremiumAI, async (req, re
     // ── 1. Fetch user profile (skills + bio) ────────────────────────────────
     const { data: profile, error: profileError } = await supabaseAdmin
       .from('profiles')
-      .select('bio, skills')
+      .select('bio, skills, city, country')
       .eq('id', userId)
       .single();
 
@@ -375,6 +379,10 @@ router.get('/opportunities', authenticateToken, requirePremiumAI, async (req, re
       profile?.skills ||
       profile?.bio ||
       'General skills not specified';
+
+    const userLocation = [profile?.city, profile?.country]
+      .filter(Boolean)
+      .join(', ') || 'Location not specified';
 
     // ── 2. Fetch top service categories (platform trends) ──────────────────
     const { data: categories, error: catError } = await supabaseAdmin
@@ -393,10 +401,12 @@ router.get('/opportunities', authenticateToken, requirePremiumAI, async (req, re
 
     // ── 3. Build Gemini prompt ───────────────────────────────────────────────
     const systemPrompt = `You are the LifeKit Market Analyst. Your job is to help service providers find new ways to earn.
-I will provide you with the User's Skills and the current Platform Trends.
+I will provide you with the User's Skills, their Location, and the current Platform Trends.
 Compare them and find 'Market Gaps'—services the user is capable of offering but hasn't listed yet.
+If the user has no specific skills listed, use their location to suggest the most high-demand, easy-to-start services in that area.
 
 User Skills: ${userSkills}
+User Location: ${userLocation}
 Platform Trends (categories users are browsing most): ${categoriesList}
 
 You MUST return STRICT JSON in this exact format:

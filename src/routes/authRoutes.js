@@ -103,14 +103,23 @@ router.post('/signup', async (req, res) => {
         // Early-adopter strategy: web provider signups get Pro tier free for 1 year
         const isEarlyAdopterProvider = is_provider_signup === true && is_web_signup === true;
 
+        // All normal app signups get a 90-day Pro trial (3% commission, up to 5 services)
+        const trialEndDate = !isEarlyAdopterProvider
+            ? new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString()
+            : null;
+
         const profilePayload = {
             id: data.user.id,
             email: email,
             full_name: full_name,
             is_service_provider: isEarlyAdopterProvider ? true : false,
             subscription_tier: isEarlyAdopterProvider ? 'pro' : 'free',
+            is_founding_member: true,
             ...(isEarlyAdopterProvider && {
                 subscription_expiry: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
+            }),
+            ...(trialEndDate && {
+                trial_end_date: trialEndDate,
             }),
         };
 

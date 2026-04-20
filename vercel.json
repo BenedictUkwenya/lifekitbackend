@@ -11,5 +11,15 @@
       "src": "/(.*)",
       "dest": "index.js"
     }
+  ],
+  "crons": [
+    {
+      "path": "/cron/check-trials",
+      "schedule": "0 8 * * *"
+    },
+    {
+      "path": "/cron/check-inactivity",
+      "schedule": "0 10 * * 1"
+    }
   ]
 }

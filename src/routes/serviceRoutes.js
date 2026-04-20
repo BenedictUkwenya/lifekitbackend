@@ -5,7 +5,7 @@ const { supabase, supabaseAdmin } = require('../config/supabase');
 const authenticateToken = require('../middleware/authMiddleware');
 
 const SERVICE_LIMITS_BY_TIER = {
-    free: 0,
+    free: 1,
     plus: 1,
     pro: 5,
     business: Infinity
@@ -100,13 +100,18 @@ router.post('/', authenticateToken, async (req, res) => {
 
         const { data: profile, error: profileError } = await supabaseAdmin
             .from('profiles')
-            .select('subscription_tier')
+            .select('subscription_tier, trial_end_date')
             .eq('id', providerId)
             .maybeSingle();
 
         if (profileError) throw profileError;
 
         const subscriptionTier = normalizeTier(profile?.subscription_tier);
+
+        // Trial check: if trial is active, treat the user as 'pro' for limit purposes
+        const isTrialActive = profile?.trial_end_date && new Date(profile.trial_end_date) > new Date();
+        const effectiveTier = isTrialActive ? 'pro' : subscriptionTier;
+
         const servicesToCreateCount = (parentCat && parentCat.is_standalone) ? 1 : selectedCats.length;
 
         const { count: existingServicesCount, error: existingServicesError } = await supabaseAdmin
@@ -117,14 +122,8 @@ router.post('/', authenticateToken, async (req, res) => {
         if (existingServicesError) throw existingServicesError;
 
         const currentServicesCount = existingServicesCount || 0;
-        if (subscriptionTier === 'plus' && (currentServicesCount + servicesToCreateCount) > 1) {
-            return res.status(403).json({ error: 'Plan limit reached' });
-        }
-        if (subscriptionTier === 'pro' && (currentServicesCount + servicesToCreateCount) > 5) {
-            return res.status(403).json({ error: 'Plan limit reached' });
-        }
-        const serviceLimit = SERVICE_LIMITS_BY_TIER[subscriptionTier] ?? SERVICE_LIMITS_BY_TIER.free;
-        if (subscriptionTier !== 'plus' && subscriptionTier !== 'pro' && serviceLimit !== Infinity && (currentServicesCount + servicesToCreateCount) > serviceLimit) {
+        const serviceLimit = SERVICE_LIMITS_BY_TIER[effectiveTier] ?? SERVICE_LIMITS_BY_TIER.free;
+        if (serviceLimit !== Infinity && (currentServicesCount + servicesToCreateCount) > serviceLimit) {
             return res.status(403).json({ error: 'Plan limit reached' });
         }
 

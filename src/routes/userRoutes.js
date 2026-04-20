@@ -533,12 +533,28 @@ router.get('/provider-stats', authenticateToken, async (req, res) => {
         ? (reviews.reduce((a, b) => a + b.rating, 0) / reviewCount).toFixed(1) 
         : "0.0";
 
+    // 5. Get Trial Info
+    const { data: providerProfile } = await supabase
+      .from('profiles')
+      .select('trial_end_date')
+      .eq('id', userId)
+      .single();
+
+    const trialEndDate = providerProfile?.trial_end_date || null;
+    const isTrialActive = trialEndDate ? new Date(trialEndDate) > new Date() : false;
+    const trialDaysLeft = isTrialActive
+      ? Math.ceil((new Date(trialEndDate) - new Date()) / (1000 * 60 * 60 * 24))
+      : 0;
+
     res.json({
       totalEarnings,
       completedJobs,
       avgRating,
       reviewCount,
-      chartData // e.g., [50, 0, 120, 30, 0, 200, 0]
+      chartData, // e.g., [50, 0, 120, 30, 0, 200, 0]
+      trialEndDate,
+      isTrialActive,
+      trialDaysLeft,
     });
 
   } catch (error) {
