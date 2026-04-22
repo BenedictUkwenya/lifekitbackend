@@ -9,6 +9,8 @@ const SUBSCRIPTION_PRICING = {
   business: 44.99
 };
 
+// Service Boost: 24h $2.99 | 3d $6.99 | 7d $14.99
+// Profile Boost: 3d $3.99 | 7d $9.99 (no 24h option)
 const BOOST_PRICING = {
   service: {
     '24h': 2.99,
@@ -16,9 +18,8 @@ const BOOST_PRICING = {
     '7d': 14.99
   },
   profile: {
-    '24h': 2.99,
-    '3d': 6.99,
-    '7d': 14.99
+    '3d': 3.99,
+    '7d': 9.99
   }
 };
 
@@ -26,6 +27,16 @@ const BOOST_DURATION_MS = {
   '24h': 24 * 60 * 60 * 1000,
   '3d': 3 * 24 * 60 * 60 * 1000,
   '7d': 7 * 24 * 60 * 60 * 1000
+};
+
+const OPPORTUNITY_BOOST_PRICE = 4.99;
+const BUNDLE_BOOST_PRICE = 19.99;
+
+// AI Premium Tools — one-time purchase, no subscription required
+const AI_TOOL_PRICING = {
+  cv_resume_builder: 4.99,
+  relocation_plan: 6.99,
+  start_earning_city_guide: 9.99
 };
 
 const normalizeTier = (tier) => (typeof tier === 'string' ? tier.toLowerCase() : '');
@@ -120,7 +131,9 @@ router.post('/subscribe', authenticateToken, async (req, res) => {
       .from('profiles')
       .update({
         subscription_tier: tier,
-        subscription_expiry: expiry
+        subscription_expiry: expiry,
+        // Business tier unlocks verified badge
+        ...(tier === 'business' ? { is_verified_business: true } : {})
       })
       .eq('id', userId);
 
@@ -166,6 +179,9 @@ router.post('/boost', authenticateToken, async (req, res) => {
     return res.status(400).json({ error: 'target_id and valid boost_duration (24h, 3d, 7d) are required.' });
   }
 
+  // Profile boosts don't have a 24h option
+  const profileOnlyDurations = ['3d', '7d'];
+
   try {
     let targetType = null;
     let serviceId = null;
@@ -191,6 +207,11 @@ router.post('/boost', authenticateToken, async (req, res) => {
       if (profileError) throw profileError;
       if (!profile) return res.status(404).json({ error: 'Target not found.' });
       targetType = 'profile';
+    }
+
+    // Validate duration is supported for this boost type
+    if (targetType === 'profile' && !profileOnlyDurations.includes(boost_duration)) {
+      return res.status(400).json({ error: 'Profile boosts support 3d and 7d only.' });
     }
 
     const price = BOOST_PRICING[targetType][boost_duration];
@@ -236,6 +257,177 @@ router.post('/boost', authenticateToken, async (req, res) => {
       boost_type: boostType,
       expires_at: expiresAt,
       wallet_balance: paymentResult.newBalance
+    });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /upgrade/opportunity-boost — $4.99 per boost, no target needed
+router.post('/opportunity-boost', authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+
+  try {
+    const paymentResult = await deductWallet(userId, OPPORTUNITY_BOOST_PRICE);
+    if (paymentResult.insufficient) {
+      return res.status(402).json({ error: 'Insufficient wallet balance.' });
+    }
+
+    const expiresAt = new Date(Date.now() + BOOST_DURATION_MS['7d']).toISOString();
+
+    const { data: boostRecord, error: boostInsertError } = await supabaseAdmin
+      .from('active_boosts')
+      .insert({
+        user_id: userId,
+        boost_type: 'opportunity',
+        expires_at: expiresAt
+      })
+      .select('id')
+      .single();
+
+    if (boostInsertError) {
+      await updateWalletBalance(paymentResult.walletId, paymentResult.newBalance + OPPORTUNITY_BOOST_PRICE);
+      return res.status(500).json({ error: 'Failed to activate opportunity boost.' });
+    }
+
+    try {
+      await recordPurchaseTransaction(paymentResult.walletId, OPPORTUNITY_BOOST_PRICE, 'Bought opportunity boost');
+    } catch (txError) {
+      await updateWalletBalance(paymentResult.walletId, paymentResult.newBalance + OPPORTUNITY_BOOST_PRICE);
+      await supabaseAdmin.from('active_boosts').delete().eq('id', boostRecord.id);
+      throw txError;
+    }
+
+    return res.status(200).json({
+      message: 'Opportunity boost activated.',
+      expires_at: expiresAt,
+      wallet_balance: paymentResult.newBalance
+    });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /upgrade/bundle-boost — $19.99/month: 2x Service + 1x Profile + 2x Opportunity Boosts
+router.post('/bundle-boost', authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+
+  try {
+    const paymentResult = await deductWallet(userId, BUNDLE_BOOST_PRICE);
+    if (paymentResult.insufficient) {
+      return res.status(402).json({ error: 'Insufficient wallet balance.' });
+    }
+
+    const expires7d = new Date(Date.now() + BOOST_DURATION_MS['7d']).toISOString();
+
+    // Insert 5 boost records: 2x service_7d, 1x profile_7d, 2x opportunity
+    const boostRows = [
+      { user_id: userId, boost_type: 'service_7d', expires_at: expires7d },
+      { user_id: userId, boost_type: 'service_7d', expires_at: expires7d },
+      { user_id: userId, boost_type: 'profile_7d', expires_at: expires7d },
+      { user_id: userId, boost_type: 'opportunity', expires_at: expires7d },
+      { user_id: userId, boost_type: 'opportunity', expires_at: expires7d }
+    ];
+
+    const { error: boostInsertError } = await supabaseAdmin
+      .from('active_boosts')
+      .insert(boostRows);
+
+    if (boostInsertError) {
+      await updateWalletBalance(paymentResult.walletId, paymentResult.newBalance + BUNDLE_BOOST_PRICE);
+      return res.status(500).json({ error: 'Failed to activate bundle boosts.' });
+    }
+
+    try {
+      await recordPurchaseTransaction(paymentResult.walletId, BUNDLE_BOOST_PRICE, 'Bought Bundle Boost Pack');
+    } catch (txError) {
+      await updateWalletBalance(paymentResult.walletId, paymentResult.newBalance + BUNDLE_BOOST_PRICE);
+      throw txError;
+    }
+
+    return res.status(200).json({
+      message: 'Bundle Boost Pack activated.',
+      boosts_added: 5,
+      expires_at: expires7d,
+      wallet_balance: paymentResult.newBalance
+    });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /upgrade/ai-tool — one-time purchase for premium AI tools
+router.post('/ai-tool', authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  const { tool_key } = req.body;
+
+  const price = AI_TOOL_PRICING[tool_key];
+  if (!price) {
+    return res.status(400).json({
+      error: 'Invalid tool_key.',
+      valid_keys: Object.keys(AI_TOOL_PRICING)
+    });
+  }
+
+  try {
+    // Check if already purchased (unique constraint enforced in DB)
+    const { data: existing } = await supabaseAdmin
+      .from('purchased_ai_tools')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('tool_key', tool_key)
+      .maybeSingle();
+
+    if (existing) {
+      return res.status(409).json({ error: 'You already own this AI tool.' });
+    }
+
+    const paymentResult = await deductWallet(userId, price);
+    if (paymentResult.insufficient) {
+      return res.status(402).json({ error: 'Insufficient wallet balance.' });
+    }
+
+    const { error: insertError } = await supabaseAdmin
+      .from('purchased_ai_tools')
+      .insert({ user_id: userId, tool_key });
+
+    if (insertError) {
+      await updateWalletBalance(paymentResult.walletId, paymentResult.newBalance + price);
+      return res.status(500).json({ error: 'Failed to unlock AI tool.' });
+    }
+
+    try {
+      await recordPurchaseTransaction(paymentResult.walletId, price, `Bought AI tool: ${tool_key}`);
+    } catch (txError) {
+      await updateWalletBalance(paymentResult.walletId, paymentResult.newBalance + price);
+      await supabaseAdmin.from('purchased_ai_tools').delete().eq('user_id', userId).eq('tool_key', tool_key);
+      throw txError;
+    }
+
+    return res.status(200).json({
+      message: `AI tool unlocked: ${tool_key}`,
+      tool_key,
+      wallet_balance: paymentResult.newBalance
+    });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /upgrade/ai-tools — list which premium AI tools the user owns
+router.get('/ai-tools', authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('purchased_ai_tools')
+      .select('tool_key, purchased_at')
+      .eq('user_id', userId);
+
+    if (error) throw error;
+
+    return res.status(200).json({
+      owned_tools: data || [],
+      catalog: Object.entries(AI_TOOL_PRICING).map(([key, price]) => ({ key, price }))
     });
   } catch (error) {
     return res.status(500).json({ error: error.message });

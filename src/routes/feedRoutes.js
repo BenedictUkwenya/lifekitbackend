@@ -19,13 +19,15 @@ const normalizeTier = (tier) => {
 const getCommunityLimitContext = async (userId) => {
   const { data: profile, error: profileError } = await supabaseAdmin
     .from('profiles')
-    .select('subscription_tier')
+    .select('subscription_tier, trial_end_date')
     .eq('id', userId)
     .maybeSingle();
 
   if (profileError) throw profileError;
 
-  const subscriptionTier = normalizeTier(profile?.subscription_tier);
+  // During an active trial users get pro-level community access (5 communities)
+  const isTrialActive = profile?.trial_end_date && new Date(profile.trial_end_date) > new Date();
+  const subscriptionTier = isTrialActive ? 'pro' : normalizeTier(profile?.subscription_tier);
   const communityLimit = COMMUNITY_LIMITS_BY_TIER[subscriptionTier] ?? COMMUNITY_LIMITS_BY_TIER.free;
 
   const { count: currentCommunityCount, error: countError } = await supabaseAdmin
@@ -236,17 +238,69 @@ router.post('/posts', authenticateAdmin, async (req, res) => {
   }
 });
 
-// 4. DELETE /feeds/posts/:id (Admin - Delete Post)
-router.delete('/posts/:id', authenticateAdmin, async (req, res) => {
+// 4. DELETE /feeds/posts/:id — post owner OR admin
+router.delete('/posts/:id', async (req, res) => {
   const { id } = req.params;
-  try {
-    const { error } = await supabaseAdmin
-      .from('posts')
-      .delete()
-      .eq('id', id);
 
+  // Determine caller: try user JWT first, fall back to admin header
+  let callerId = null;
+  let isAdmin = false;
+  try {
+    const jwt = require('../middleware/authMiddleware');
+    await new Promise((resolve) => jwt(req, res, resolve));
+    callerId = req.user?.id ?? null;
+  } catch (_) {}
+
+  // Check admin header as fallback
+  const adminHeader = req.headers['x-admin-token'] || req.headers['authorization'];
+  if (!callerId) {
+    // If no user token, require admin middleware
+    const adminCheck = require('../middleware/adminMiddleware');
+    return adminCheck(req, res, async () => {
+      try {
+        const { error } = await supabaseAdmin.from('posts').delete().eq('id', id);
+        if (error) throw error;
+        res.json({ message: 'Post deleted successfully' });
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+  }
+
+  try {
+    // Verify the caller owns the post
+    const { data: post, error: fetchErr } = await supabaseAdmin
+      .from('posts').select('user_id').eq('id', id).maybeSingle();
+    if (fetchErr || !post) return res.status(404).json({ error: 'Post not found.' });
+    if (post.user_id !== callerId) return res.status(403).json({ error: 'You can only delete your own posts.' });
+
+    const { error } = await supabaseAdmin.from('posts').delete().eq('id', id);
     if (error) throw error;
-    res.json({ message: "Post deleted successfully" });
+    res.json({ message: 'Post deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 4b. DELETE /feeds/posts/:id/comments/:commentId — commenter can delete own comment
+router.delete('/posts/:id/comments/:commentId', authenticateToken, async (req, res) => {
+  const { commentId } = req.params;
+  const userId = req.user.id;
+  try {
+    const { data: comment, error: fetchErr } = await supabaseAdmin
+      .from('comments').select('user_id, post_id').eq('id', commentId).maybeSingle();
+    if (fetchErr || !comment) return res.status(404).json({ error: 'Comment not found.' });
+    if (comment.user_id !== userId) return res.status(403).json({ error: 'You can only delete your own comments.' });
+
+    const { error } = await supabaseAdmin.from('comments').delete().eq('id', commentId);
+    if (error) throw error;
+
+    // Decrement comments_count
+    const { data: post } = await supabaseAdmin.from('posts').select('comments_count').eq('id', comment.post_id).single();
+    if (post) {
+      await supabaseAdmin.from('posts').update({ comments_count: Math.max(0, (post.comments_count || 1) - 1) }).eq('id', comment.post_id);
+    }
+    res.json({ message: 'Comment deleted.' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -832,13 +886,44 @@ router.post('/groups/posts/:postId/like', authenticateToken, async (req, res) =>
     const { data: existing } = await supabaseAdmin
       .from('group_post_likes').select('*').eq('post_id', postId).eq('user_id', userId).maybeSingle();
 
+    let isLiked;
     if (existing) {
       await supabaseAdmin.from('group_post_likes').delete().eq('id', existing.id);
-      res.json({ message: "Unliked", isLiked: false });
+      isLiked = false;
     } else {
       await supabaseAdmin.from('group_post_likes').insert({ post_id: postId, user_id: userId });
-      res.json({ message: "Liked", isLiked: true });
+      isLiked = true;
     }
+
+    // Recount and persist likes_count on group_posts
+    const { data: likesData } = await supabaseAdmin
+      .from('group_post_likes').select('id').eq('post_id', postId);
+    const likesCount = Array.isArray(likesData) ? likesData.length : 0;
+    await supabaseAdmin.from('group_posts').update({ likes_count: likesCount }).eq('id', postId);
+
+    res.json({ message: isLiked ? 'Liked' : 'Unliked', isLiked, likes_count: likesCount });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// DELETE /groups/posts/:postId/comments/:commentId — commenter can delete own
+router.delete('/groups/posts/:postId/comments/:commentId', authenticateToken, async (req, res) => {
+  const { postId, commentId } = req.params;
+  const userId = req.user.id;
+  try {
+    const { data: comment, error: fetchErr } = await supabaseAdmin
+      .from('group_comments').select('user_id').eq('id', commentId).eq('post_id', postId).maybeSingle();
+    if (fetchErr || !comment) return res.status(404).json({ error: 'Comment not found.' });
+    if (comment.user_id !== userId) return res.status(403).json({ error: 'You can only delete your own comments.' });
+
+    const { error } = await supabaseAdmin.from('group_comments').delete().eq('id', commentId);
+    if (error) throw error;
+
+    // Decrement comments_count
+    const { data: post } = await supabaseAdmin.from('group_posts').select('comments_count').eq('id', postId).single();
+    if (post) {
+      await supabaseAdmin.from('group_posts').update({ comments_count: Math.max(0, (post.comments_count || 1) - 1) }).eq('id', postId);
+    }
+    res.json({ message: 'Comment deleted.' });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
@@ -1020,6 +1105,18 @@ router.delete('/groups/posts/:postId', authenticateToken, async (req, res) => {
     }
 
     res.json({ message: "Post deleted successfully" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// DELETE /feeds/groups/admin/:id — Platform admin force-deletes any group
+router.delete('/groups/admin/:id', authenticateAdmin, async (req, res) => {
+  const groupId = req.params.id;
+  try {
+    const { error } = await supabaseAdmin.from('groups').delete().eq('id', groupId);
+    if (error) throw error;
+    res.json({ message: 'Group deleted by admin.' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

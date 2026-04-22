@@ -5,7 +5,7 @@ const { supabase, supabaseAdmin } = require('../config/supabase');
 const authenticateToken = require('../middleware/authMiddleware');
 
 const SERVICE_LIMITS_BY_TIER = {
-    free: 1,
+    free: 0,   // Free plan: cannot post services
     plus: 1,
     pro: 5,
     business: Infinity
