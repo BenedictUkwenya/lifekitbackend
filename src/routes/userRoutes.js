@@ -214,15 +214,14 @@ router.get('/schedule/:providerId', async (req, res) => {
   const { providerId } = req.params;
 
   try {
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('provider_schedules')
       .select('*')
-      .eq('provider_id', providerId)
-      .eq('is_active', true);
+      .eq('provider_id', providerId);
 
     if (error) throw error;
 
-    res.status(200).json({ schedule: data });
+    res.status(200).json({ schedule: data || [] });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS swap_requests (
   scheduled_time       TIMESTAMPTZ,
 
   -- AI match score set by the backend when creating the match
-  ai_match_score       NUMERIC(4,2) DEFAULT 0,
+  ai_match_score       NUMERIC(5,2) DEFAULT 0,
   ai_match_reason      TEXT,
 
   -- Lifecycle

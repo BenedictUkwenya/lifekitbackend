@@ -414,12 +414,14 @@ You MUST return STRICT JSON in this exact format:
   "opportunities": [
     {
       "title": "Service Name",
+      "category": "Exact category name from the Platform Trends list above",
       "demand_level": "High" | "Medium",
       "reason": "Why this is a good match for this user",
       "suggested_price": "Price range in USD"
     }
   ]
 }
+The "category" field MUST exactly match one of the category names from the Platform Trends list.
 Return between 3 and 6 opportunities. Do not include any explanation, markdown, or extra text outside the JSON object.`;
 
     // ── 4. Call Gemini (with fallback cascade) ─────────────────────────────────────────

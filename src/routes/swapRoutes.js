@@ -65,6 +65,9 @@ router.post('/', authenticateToken, async (req, res) => {
     ai_match_reason = '',
   } = req.body;
 
+  // Clamp to column precision NUMERIC(5,2) — max 999.99, store as 0–100
+  const clampedScore = Math.min(Math.max(Number(ai_match_score) || 0, 0), 100);
+
   if (!proposer_service_id || !target_user_id) {
     return res.status(400).json({ error: 'proposer_service_id and target_user_id are required.' });
   }
@@ -110,7 +113,7 @@ router.post('/', authenticateToken, async (req, res) => {
         service_type,
         notes: notes || null,
         scheduled_time: scheduled_time || null,
-        ai_match_score,
+        ai_match_score: clampedScore,
         ai_match_reason,
         status: 'pending',
       })
@@ -185,6 +188,35 @@ router.get('/outgoing', authenticateToken, async (req, res) => {
   } catch (err) {
     console.error('GET /swap-requests/outgoing error:', err);
     return res.status(500).json({ error: 'Failed to fetch outgoing swaps.' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /swap-requests/available-services
+// Services from OTHER providers that have is_skill_swap_available = true.
+// Used in the Discover tab alongside posted swap proposals.
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/available-services', authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('services')
+      .select(`
+        id, title, description, price, pricing_type, image_urls, category_id,
+        provider:profiles!provider_id ( id, full_name, profile_picture_url ),
+        category:service_categories!category_id ( id, name )
+      `)
+      .eq('is_skill_swap_available', true)
+      .eq('status', 'active')
+      .neq('provider_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(40);
+
+    if (error) throw error;
+    return res.json({ services: data || [] });
+  } catch (err) {
+    console.error('GET /swap-requests/available-services error:', err);
+    return res.status(500).json({ error: 'Failed to load swap-available services.' });
   }
 });
 
