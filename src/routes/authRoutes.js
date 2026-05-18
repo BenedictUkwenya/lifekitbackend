@@ -468,4 +468,55 @@ router.put('/update-password', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Internal server error.' });
   }
 });
+
+/**
+ * POST /auth/ensure-social-profile
+ * Called after OAuth sign-in to upsert a profile row for social users.
+ * Requires a valid Supabase access token in the Authorization header.
+ */
+router.post('/ensure-social-profile', async (req, res) => {
+  const authHeader = req.headers['authorization'];
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  const token = authHeader.split(' ')[1];
+
+  // Verify the token with Supabase
+  const { data: { user }, error: authError } = await supabase.auth.getUser(token);
+  if (authError || !user) {
+    return res.status(401).json({ error: 'Invalid or expired token.' });
+  }
+
+  const fullName =
+    user.user_metadata?.full_name ||
+    user.user_metadata?.name ||
+    user.email?.split('@')[0] ||
+    'LifeKit User';
+  const avatarUrl =
+    user.user_metadata?.avatar_url ||
+    user.user_metadata?.picture ||
+    null;
+
+  // Upsert profile – ignoreDuplicates prevents overwriting existing data
+  const { error: profileError } = await supabaseAdmin
+    .from('profiles')
+    .upsert(
+      {
+        id: user.id,
+        full_name: fullName,
+        email: user.email,
+        profile_picture_url: avatarUrl,
+        is_founding_member: true,
+        trial_end_date: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString(),
+      },
+      { onConflict: 'id', ignoreDuplicates: true }
+    );
+
+  if (profileError) {
+    console.error('Social profile upsert error:', profileError.message);
+  }
+
+  return res.status(200).json({ success: true, user_id: user.id });
+});
+
 module.exports = router;
