@@ -550,5 +550,25 @@ router.get('/provider-schedule/:providerId', async (req, res) => {
   }
 });
 
+/**
+ * GET /bookings/:id - Get a single booking by ID (must be client or provider)
+ * NOTE: Must be defined AFTER all specific named routes to avoid shadowing /client, /provider etc.
+ */
+router.get('/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const userId = req.user.id;
+  try {
+    const { data: booking, error } = await supabaseAdmin
+      .from('bookings')
+      .select('*, services(title, image_urls), profiles!provider_id(id, full_name, profile_picture_url)')
+      .eq('id', id)
+      .or(`client_id.eq.${userId},provider_id.eq.${userId}`)
+      .single();
+    if (error || !booking) return res.status(404).json({ error: 'Booking not found.' });
+    return res.json({ booking });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to fetch booking.' });
+  }
+});
 
 module.exports = router;

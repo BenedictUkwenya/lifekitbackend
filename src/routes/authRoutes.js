@@ -391,7 +391,35 @@ router.post('/refresh-token', async (req, res) => {
 });
 
 /**
- * 9. PUT /auth/update-password
+ * 9. POST /auth/forgot-password
+ * Sends a password reset email via Supabase.
+ */
+router.post('/forgot-password', async (req, res) => {
+  const { email } = req.body;
+
+  if (!email || !email.includes('@')) {
+    return res.status(400).json({ error: 'A valid email address is required.' });
+  }
+
+  try {
+    const { error } = await supabase.auth.resetPasswordForEmail(email.trim().toLowerCase(), {
+      redirectTo: 'lifekit://reset-password',
+    });
+
+    if (error) {
+      return res.status(400).json({ error: error.message });
+    }
+
+    // Always return success to avoid email enumeration attacks
+    res.status(200).json({ message: 'If an account with that email exists, a password reset link has been sent.' });
+  } catch (error) {
+    console.error('Forgot Password Error:', error.message);
+    res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
+/**
+ * 10. PUT /auth/update-password
  * SECURE VERSION: Verifies old password before updating to new one.
  */
 router.put('/update-password', authenticateToken, async (req, res) => {

@@ -146,7 +146,7 @@ router.post('/', authenticateToken, async (req, res) => {
                     currency: currency,
                     image_urls: [],
                     service_type: 'Home Service (HS)',
-                    status: 'draft',
+                    status: 'active',
                     service_options: options,
                     is_skill_swap_available: is_skill_swap_available
                 })
@@ -165,7 +165,7 @@ router.post('/', authenticateToken, async (req, res) => {
             currency: currency,
             image_urls: [], 
             service_type: 'Default',
-            status: 'draft',
+            status: 'active',
             is_skill_swap_available: is_skill_swap_available
         }));
 
@@ -216,9 +216,7 @@ router.put('/:id', authenticateToken, async (req, res) => {
     if (service_options !== undefined) updateData.service_options = service_options;
     if (is_skill_swap_available !== undefined) updateData.is_skill_swap_available = is_skill_swap_available;
 
-    if (status === 'active' || status === 'pending') {
-        updateData.status = 'pending'; 
-    }
+    // Providers can set their service active/inactive directly (no admin approval needed)
 
     try {
         const { data: existingService, error: existingServiceError } = await supabase

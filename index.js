@@ -85,7 +85,7 @@ app.use('/cron', cronRoutes);
 // Only run app.listen if we are NOT in production (i.e. running locally)
 // Vercel handles the server start automatically via the exported 'app'
 if (process.env.NODE_ENV !== 'production') {
-  const PORT = process.env.PORT || 3000;
+  const PORT = parseInt(process.env.PORT, 10) || 3000;
   app.listen(PORT, () => {
     console.log(`Server running locally on port ${PORT}`);
     console.log(`Supabase URL: ${process.env.SUPABASE_URL}`);

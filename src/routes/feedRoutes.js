@@ -131,12 +131,9 @@ router.post('/posts/share-service/:serviceId', authenticateToken, async (req, re
       : null;
 
     const currencySymbol = service.currency === 'NGN' ? '₦' : '$';
-    const shortDescription = (service.description || '').toString().trim();
-    const previewText = shortDescription.length > 120
-      ? `${shortDescription.substring(0, 117)}...`
-      : shortDescription;
-    const bookLink = `lifekit://service/${service.id}`;
-    const content = `${previewText || 'I just shared my service on LifeKit.'}\n\nBook Now: ${bookLink}`;
+    const description = (service.description || '').toString().trim();
+    // Use description directly — the feed card will render Book/Swap CTAs
+    const content = description || 'Check out this service on LifeKit.';
 
     const { data: post, error: postError } = await supabaseAdmin
       .from('posts')
@@ -144,15 +141,18 @@ router.post('/posts/share-service/:serviceId', authenticateToken, async (req, re
         title: `${service.title} • ${currencySymbol}${service.price ?? 0}`,
         content,
         image_url: firstImage,
+        image_urls: Array.isArray(service.image_urls) ? service.image_urls.slice(0, 3) : [],
         user_id: userId,
+        service_id: service.id,
+        tag: 'service',
         likes_count: 0,
         comments_count: 0
       })
-      .select()
+      .select(`*, profiles(full_name, username, profile_picture_url)`)
       .single();
 
     if (postError) throw postError;
-    res.status(201).json(post);
+    res.status(201).json({ ...post, is_liked_by_me: false });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -212,27 +212,40 @@ router.get('/events/:id/meta', authenticateToken, async (req, res) => {
 
 // --- ADMIN ACTIONS ---
 
-// 3. POST /feeds/posts (Admin - Create Post)
-router.post('/posts', authenticateAdmin, async (req, res) => {
-  const { title, content, image_url } = req.body;
-  const userId = req.user.id; // The Admin's ID
+// 3. POST /feeds/posts — any authenticated user can create a post
+router.post('/posts', authenticateToken, async (req, res) => {
+  const { title, content, image_url, image_urls, tag } = req.body;
+  const userId = req.user.id;
+
+  if (!content || !content.trim()) {
+    return res.status(400).json({ error: 'content is required' });
+  }
+
+  const validTags = ['general', 'skill_offer', 'service', 'looking_for', 'tip', 'swap'];
+  const safeTag = validTags.includes(tag) ? tag : 'general';
+
+  // Normalise image arrays — accept up to 3 URLs
+  const rawUrls = Array.isArray(image_urls) ? image_urls : (image_url ? [image_url] : []);
+  const safeUrls = rawUrls.filter(u => typeof u === 'string' && u.startsWith('http')).slice(0, 3);
 
   try {
     const { data, error } = await supabaseAdmin
       .from('posts')
       .insert({
-        title: title || null,
-        content,
-        image_url,
+        title: title?.trim() || null,
+        content: content.trim(),
+        image_url: safeUrls[0] || null,
+        image_urls: safeUrls.length > 0 ? safeUrls : [],
         user_id: userId,
+        tag: safeTag,
         likes_count: 0,
         comments_count: 0
       })
-      .select()
+      .select(`*, profiles(full_name, username, profile_picture_url)`)
       .single();
 
     if (error) throw error;
-    res.status(201).json(data);
+    res.status(201).json({ ...data, is_liked_by_me: false });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -830,6 +843,44 @@ router.get('/groups/:id/members', authenticateToken, async (req, res) => {
       .from('group_members')
       .select('*, profiles(id, full_name, profile_picture_url, username)')
       .eq('group_id', req.params.id);
+
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PUT /groups/:id - Update group profile (admin only)
+router.put('/groups/:id', authenticateToken, async (req, res) => {
+  const groupId = req.params.id;
+  const userId = req.user.id;
+  const { name, description, image_url, anyone_can_post, is_private } = req.body;
+
+  try {
+    const { data: member } = await supabaseAdmin.from('group_members')
+      .select('is_admin').eq('group_id', groupId).eq('user_id', userId).maybeSingle();
+
+    if (!member || !member.is_admin) {
+      return res.status(403).json({ error: 'Only admins can update group settings.' });
+    }
+
+    const updates = {};
+    if (name !== undefined) updates.name = name.trim();
+    if (description !== undefined) updates.description = description.trim();
+    if (image_url !== undefined) updates.image_url = image_url;
+    if (anyone_can_post !== undefined) updates.anyone_can_post = anyone_can_post;
+    if (is_private !== undefined) updates.is_private = is_private;
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: 'No fields to update.' });
+    }
+
+    const { data, error } = await supabaseAdmin.from('groups')
+      .update(updates)
+      .eq('id', groupId)
+      .select()
+      .single();
 
     if (error) throw error;
     res.json(data);

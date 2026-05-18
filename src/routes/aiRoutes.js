@@ -207,7 +207,7 @@ router.post('/chat', authenticateToken, requirePremiumAI, async (req, res) => {
     ]);
 
     // ── 2. Build dynamic system prompt ──────────────────────────────────────
-    const systemPrompt = `You are LifeKit AI, a helpful, conversational assistant for the LifeKit app. Your goal is to help users find services, communities, and navigate the city.
+    const systemPrompt = `You are Gracia, a helpful, conversational assistant for the LifeKit app. Your goal is to help users find services, communities, and navigate the city.
 Here is the current live data from the LifeKit platform:
 SERVICES: ${JSON.stringify(services ?? [])}
 COMMUNITIES: ${JSON.stringify(communities ?? [])}
@@ -627,24 +627,25 @@ router.post('/skill-swap-matches', authenticateToken, requirePremiumAI, async (r
   }
 
   try {
-    // 1. Fetch my offered service
+    // 1. Fetch my offered service (lookup by ID only, verify ownership in code)
     const { data: myService, error: myErr } = await supabaseAdmin
       .from('services')
-      .select('id, title, description, price, sub_category_id')
+      .select('id, title, description, price, category_id, sub_category_id, provider_id')
       .eq('id', my_service_id)
-      .eq('provider_id', userId)
       .single();
 
-    if (myErr || !myService) {
+    if (myErr || !myService || myService.provider_id !== userId) {
       return res.status(404).json({ error: 'Your service was not found.' });
     }
 
-    // 2. Fetch all active services in the target category (exclude self)
+    // 2. Fetch all active swap-available services in the target category (exclude self)
+    // Search both category_id and sub_category_id since either may be set
     const { data: candidates, error: candErr } = await supabaseAdmin
       .from('services')
       .select('id, title, description, price, provider_id, image_urls, average_rating, profiles(id, full_name, profile_picture_url, bio)')
-      .eq('sub_category_id', target_category_id)
+      .or(`category_id.eq.${target_category_id},sub_category_id.eq.${target_category_id}`)
       .eq('status', 'active')
+      .eq('is_skill_swap_available', true)
       .neq('provider_id', userId)
       .limit(20);
 

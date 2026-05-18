@@ -19,7 +19,7 @@ router.post('/upload/:folder', authenticateToken, upload.single('file'), async (
 
   if (!file) return res.status(400).json({ error: 'No file uploaded.' });
 
-  const allowedFolders = ['profiles', 'services', 'avatars'];
+  const allowedFolders = ['profiles', 'services', 'avatars', 'posts', 'groups'];
   if (!allowedFolders.includes(folder)) {
     return res.status(400).json({ error: `Invalid folder. Allowed: ${allowedFolders.join(', ')}` });
   }

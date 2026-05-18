@@ -4,20 +4,27 @@ const { supabase, supabaseAdmin } = require('../config/supabase');
 const authenticateToken = require('../middleware/authMiddleware');
 
 /**
- * 1. POST /reviews - Submit a Review
+ * 1. POST /reviews - Submit a Review (bidirectional: client rates provider, provider rates client)
  */
 router.post('/', authenticateToken, async (req, res) => {
-  const { booking_id, service_id, provider_id, rating, comment } = req.body;
+  const { booking_id, service_id, reviewee_id, reviewer_role, rating, comment } = req.body;
   const reviewer_id = req.user.id;
+
+  if (!booking_id || !reviewee_id || !reviewer_role || !rating) {
+    return res.status(400).json({ error: 'booking_id, reviewee_id, reviewer_role, and rating are required.' });
+  }
 
   try {
     // A. Insert the Review
-    const { data: review, error } = await supabase
+    const { data: review, error } = await supabaseAdmin
       .from('reviews')
       .insert({
         booking_id,
-        service_id,
-        provider_id,
+        service_id: service_id || null,
+        // Keep provider_id populated for client reviews (backwards compat)
+        provider_id: reviewer_role === 'client' ? reviewee_id : null,
+        reviewee_id,
+        reviewer_role,
         reviewer_id,
         rating,
         comment
@@ -27,32 +34,32 @@ router.post('/', authenticateToken, async (req, res) => {
 
     if (error) throw error;
 
-    // B. Recalculate Average Rating for the Service
-    // 1. Fetch all ratings for this service
-    const { data: allReviews } = await supabase
-      .from('reviews')
-      .select('rating')
-      .eq('service_id', service_id);
+    // B. Only update service average rating when a client rates the provider
+    if (reviewer_role === 'client' && service_id) {
+      const { data: allReviews } = await supabaseAdmin
+        .from('reviews')
+        .select('rating')
+        .eq('service_id', service_id)
+        .eq('reviewer_role', 'client');
 
-    // 2. Calculate Math
-    const totalReviews = allReviews.length;
-    const sumRatings = allReviews.reduce((sum, r) => sum + r.rating, 0);
-    const newAverage = (sumRatings / totalReviews).toFixed(1); // e.g. 4.5
+      const totalReviews = allReviews.length;
+      const sumRatings = allReviews.reduce((sum, r) => sum + r.rating, 0);
+      const newAverage = (sumRatings / totalReviews).toFixed(1);
 
-    // 3. Update Service Table (So lists are fast)
-    await supabaseAdmin
-      .from('services')
-      .update({ 
-        average_rating: newAverage,
-        total_reviews: totalReviews 
-      })
-      .eq('id', service_id);
+      await supabaseAdmin
+        .from('services')
+        .update({ 
+          average_rating: newAverage,
+          total_reviews: totalReviews 
+        })
+        .eq('id', service_id);
+    }
 
     res.status(201).json({ message: 'Review submitted!', review });
 
   } catch (error) {
     console.error('Review Error:', error.message);
-    res.status(500).json({ error: error.message }); // Booking_id unique constraint will trigger here if dup
+    res.status(500).json({ error: error.message });
   }
 });
 

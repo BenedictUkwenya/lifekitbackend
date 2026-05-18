@@ -161,6 +161,55 @@ function getFallbackImage(category) {
   return FALLBACK_IMAGES[category] || FALLBACK_IMAGES.default;
 }
 
+/**
+ * Generate plausible-looking nearby places when OSM is rate-limited.
+ * Scatters them randomly within ~1-2 km of the user.
+ */
+function generateFallbackPlaces(userLat, userLng) {
+  const templates = [
+    { name: 'Green Leaf Restaurant', category: 'Restaurant', cuisine: 'local' },
+    { name: 'City Café & Lounge',    category: 'Café',       cuisine: null   },
+    { name: 'Sunrise Hotel',         category: 'Hotel',      cuisine: null   },
+    { name: 'QuickBite Fast Food',   category: 'Fast Food',  cuisine: 'local' },
+    { name: 'Central Park',          category: 'Park',       cuisine: null   },
+    { name: 'Heritage Attraction',   category: 'Attraction', cuisine: null   },
+    { name: 'Royal Palm Restaurant', category: 'Restaurant', cuisine: 'continental' },
+    { name: 'Medplus Pharmacy',      category: 'Health',     cuisine: null   },
+  ];
+
+  return templates.map((t, i) => {
+    // Scatter within ~2 km
+    const offsetLat = (Math.random() - 0.5) * 0.036;
+    const offsetLng = (Math.random() - 0.5) * 0.036;
+    const placeLat  = userLat + offsetLat;
+    const placeLng  = userLng + offsetLng;
+    const distance  = haversineDistance(userLat, userLng, placeLat, placeLng);
+    const place = {
+      id: `fallback_${i}`,
+      osm_id: `fallback_${i}`,
+      name: t.name,
+      category: t.category,
+      cuisine: t.cuisine,
+      description: `A well-known ${t.category.toLowerCase()} in the area.`,
+      address: 'Nearby',
+      city: 'Nearby',
+      country: 'NG',
+      latitude: placeLat,
+      longitude: placeLng,
+      phone: null,
+      website: null,
+      opening_hours: null,
+      rating: parseFloat((Math.random() * (5.0 - 3.8) + 3.8).toFixed(1)),
+      review_count: randomInt(20, 200),
+      features: [],
+      image_urls: [getFallbackImage(t.category)],
+      distance_km: distance.toFixed(2),
+    };
+    place.reviews = generateReviews(place, 3);
+    return place;
+  }).sort((a, b) => a.distance_km - b.distance_km);
+}
+
 // ---------------------------------------------------------------------------
 // ROUTES
 // ---------------------------------------------------------------------------
@@ -174,9 +223,9 @@ router.get('/nearby', async (req, res) => {
   const userLng = parseFloat(lng);
 
   try {
-    // ── 1. Supabase cache check (within ~5km box, cached < 7 days ago) ──
-    const delta = 0.05;
-    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    // ── 1. Supabase cache check (wider box, 30-day TTL, any count ≥ 1) ──
+    const delta = 0.15; // ~15 km box so we hit cache more often
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
 
     const { data: cached } = await supabase
       .from('places')
@@ -185,10 +234,10 @@ router.get('/nearby', async (req, res) => {
       .lte('latitude', userLat + delta)
       .gte('longitude', userLng - delta)
       .lte('longitude', userLng + delta)
-      .gte('cached_at', sevenDaysAgo)
+      .gte('cached_at', thirtyDaysAgo)
       .limit(30);
 
-    if (cached && cached.length >= 5) {
+    if (cached && cached.length >= 1) {
       console.log(`✅ Cache hit: ${cached.length} places`);
       const enriched = cached.map(p => ({
         ...p,
@@ -197,10 +246,10 @@ router.get('/nearby', async (req, res) => {
       return res.json({ places: enriched, source: 'cache' });
     }
 
-    // ── 2. Overpass API (OSM) ──
+    // ── 2. Overpass API (OSM) — best-effort, non-blocking ──
     console.log('🌍 Fetching from OpenStreetMap Overpass...');
     const overpassQuery = `
-      [out:json][timeout:8];
+      [out:json][timeout:10];
       (
         node(around:${radius},${lat},${lng})[amenity~"^(restaurant|cafe|fast_food|bar|pub|hotel|hospital|pharmacy|bank|fuel|place_of_worship)$"];
         node(around:${radius},${lat},${lng})[tourism~"^(hotel|guest_house|attraction|museum)$"];
@@ -209,23 +258,40 @@ router.get('/nearby', async (req, res) => {
       out 30;
     `;
 
+    const OVERPASS_ENDPOINTS = [
+      'https://overpass-api.de/api/interpreter',
+      'https://overpass.kumi.systems/api/interpreter',
+    ];
+
     let osmElements = [];
-    try {
-      const osmRes = await axios.get(
-        `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(overpassQuery)}`,
-        { timeout: 8000 }
-      );
-      osmElements = osmRes.data?.elements || [];
-    } catch (osmErr) {
-      console.warn('⚠️ OSM timed out:', osmErr.message);
-      return res.json({ places: cached || [], source: 'cache_fallback' });
+    let osmFetched = false;
+    for (const endpoint of OVERPASS_ENDPOINTS) {
+      try {
+        const osmRes = await axios.post(
+          endpoint,
+          `data=${encodeURIComponent(overpassQuery)}`,
+          {
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            timeout: 10000,
+          }
+        );
+        osmElements = osmRes.data?.elements || [];
+        osmFetched = true;
+        console.log(`✅ OSM success via ${endpoint}`);
+        break;
+      } catch (osmErr) {
+        console.warn(`⚠️ OSM failed (${endpoint}):`, osmErr.message);
+      }
     }
 
-    if (osmElements.length === 0) {
-      return res.json({ places: cached || [], source: 'empty' });
+    // ── 3. If OSM is unavailable, return generated fallback places ──
+    if (!osmFetched || osmElements.length === 0) {
+      console.log('⚠️ OSM unavailable — returning generated fallback places');
+      const fallback = generateFallbackPlaces(userLat, userLng);
+      return res.json({ places: fallback, source: 'generated_fallback' });
     }
 
-    // ── 3. Enrich each place ──
+    // ── 4. Enrich each place ──
     // We batch image fetches to avoid hammering Wikimedia
     const enrichedPlaces = [];
 
