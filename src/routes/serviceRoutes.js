@@ -25,10 +25,15 @@ function getLang(req) {
  */
 function localiseService(svc, lang) {
   if (!svc || lang === 'en') return svc;
+  const cat = svc.service_categories;
   return {
     ...svc,
     title:       svc.title_translations?.[lang]       || svc.title,
     description: svc.description_translations?.[lang] || svc.description,
+    service_categories: cat ? {
+      ...cat,
+      name: cat.name_translations?.[lang] || cat.name,
+    } : cat,
   };
 }
 
@@ -68,7 +73,7 @@ router.get('/my-services', authenticateToken, async (req, res) => {
     try {
         const { data: services, error } = await supabase
             .from('services')
-            .select('*, service_categories(name)')
+            .select('*, service_categories(name, name_translations)')
             .eq('provider_id', providerId)
             .order('created_at', { ascending: false });
 
@@ -501,7 +506,7 @@ router.get('/provider/:providerId', async (req, res) => {
     try {
         const { data: services, error } = await supabase
             .from('services')
-            .select('*, service_categories(name)')
+            .select('*, service_categories(name, name_translations)')
             .eq('provider_id', providerId)
             .eq('status', 'active')
             .order('title', { ascending: true });
@@ -543,7 +548,7 @@ router.get('/:id', async (req, res) => {
     try {
         const { data: service, error } = await supabase
             .from('services')
-            .select('*, profiles(full_name, profile_picture_url), service_categories(name)') 
+            .select('*, profiles(full_name, profile_picture_url), service_categories(name, name_translations)') 
             .eq('id', id)
             .eq('status', 'active') 
             .single();

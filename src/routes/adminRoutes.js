@@ -6,6 +6,28 @@ const authenticateAdmin = require('../middleware/adminMiddleware');
 const chatRoutes = require('./chatRoutes');
 // ADDED: subMonths and format are needed for the charts
 const { startOfMonth, startOfWeek, startOfYear, subMonths, format } = require('date-fns');
+const { translateText } = require('../utils/autoTranslate');
+
+// ── i18n helpers ──────────────────────────────────────────────────────────────
+function getLang(req) {
+  const raw = req.headers['accept-language'] || 'en';
+  const code = raw.split(',')[0].split('-')[0].toLowerCase().trim();
+  return ['en', 'ka', 'ru'].includes(code) ? code : 'en';
+}
+
+function localiseService(svc, lang) {
+  if (!svc || lang === 'en') return svc;
+  const cat = svc.service_categories;
+  return {
+    ...svc,
+    title:       svc.title_translations?.[lang]       || svc.title,
+    description: svc.description_translations?.[lang] || svc.description,
+    service_categories: cat ? {
+      ...cat,
+      name: cat.name_translations?.[lang] || cat.name,
+    } : cat,
+  };
+}
 
 // Apply Admin Security to all routes
 router.use(authenticateAdmin);
@@ -208,14 +230,15 @@ router.get('/stats', async (req, res) => {
 
 // GET /admin/services-queue
 router.get('/services-queue', async (req, res) => {
+  const lang = getLang(req);
   try {
     const { data, error } = await supabaseAdmin
       .from('services')
-      .select('*, profiles:provider_id(full_name, email, profile_picture_url), service_categories(name)')
+      .select('*, profiles:provider_id(full_name, email, profile_picture_url), service_categories(name, name_translations)')
       .order('created_at', { ascending: false });
 
     if (error) throw error;
-    res.json(data);
+    res.json((data || []).map(s => localiseService(s, lang)));
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -387,8 +410,20 @@ router.post('/categories', async (req, res) => {
   const { name, description, image_url, parent_id } = req.body; 
   try {
     if (!name) return res.status(400).json({ error: "Category Name is required" });
+
+    // Auto-translate the category name into ka and ru
+    const nameTranslations = {};
+    await Promise.all(['ka', 'ru'].map(async (lang) => {
+      const translated = await translateText(name, lang);
+      if (translated && translated !== name) nameTranslations[lang] = translated;
+    }));
+
     const payload = { 
-      name, description: description || '', image_url: image_url || null, parent_category_id: parent_id || null 
+      name,
+      name_translations: nameTranslations,
+      description: description || '',
+      image_url: image_url || null,
+      parent_category_id: parent_id || null,
     };
     const { data, error } = await supabaseAdmin.from('service_categories').insert(payload).select().single();
     if (error) throw error;
