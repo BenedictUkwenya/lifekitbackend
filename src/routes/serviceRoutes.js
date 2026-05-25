@@ -3,6 +3,34 @@ const express = require('express');
 const router = express.Router();
 const { supabase, supabaseAdmin } = require('../config/supabase');
 const authenticateToken = require('../middleware/authMiddleware');
+const { translateFields } = require('../utils/autoTranslate');
+
+// ── i18n helpers ─────────────────────────────────────────────────────────────
+
+/**
+ * Extract the preferred language from the Accept-Language header.
+ * Supports full tags like "ka-GE,ka;q=0.9" → "ka".
+ * Falls back to 'en' for any unsupported or missing value.
+ */
+function getLang(req) {
+  const raw = req.headers['accept-language'] || 'en';
+  const code = raw.split(',')[0].split('-')[0].toLowerCase().trim();
+  return ['en', 'ka', 'ru'].includes(code) ? code : 'en';
+}
+
+/**
+ * Swap title/description with the best available translation for the
+ * requested language. Falls back to the stored English value if no
+ * translation exists yet (e.g. right after creation, before async job runs).
+ */
+function localiseService(svc, lang) {
+  if (!svc || lang === 'en') return svc;
+  return {
+    ...svc,
+    title:       svc.title_translations?.[lang]       || svc.title,
+    description: svc.description_translations?.[lang] || svc.description,
+  };
+}
 
 const SERVICE_LIMITS_BY_TIER = {
     free: 0,   // Free plan: cannot post services
@@ -35,6 +63,7 @@ const getTierWeight = (tier) => {
  */
 router.get('/my-services', authenticateToken, async (req, res) => {
     const providerId = req.user.id;
+    const lang = getLang(req);
 
     try {
         const { data: services, error } = await supabase
@@ -50,7 +79,7 @@ router.get('/my-services', authenticateToken, async (req, res) => {
 
         res.status(200).json({
             message: 'Your services fetched successfully!',
-            services: services,
+            services: (services || []).map(s => localiseService(s, lang)),
         });
 
     } catch (error) {
@@ -135,13 +164,16 @@ router.post('/', authenticateToken, async (req, res) => {
                 price: 0
             }));
 
+            const insertTitle = `${parentCat.name} Services`;
+            const insertDesc  = `Professional ${parentCat.name} services including ${options.map(o => o.name).join(', ')}.`;
+
             const { data, error } = await supabase
                 .from('services')
                 .insert({
                     provider_id: providerId,
                     category_id: parentCat.id,
-                    title: `${parentCat.name} Services`,
-                    description: `Professional ${parentCat.name} services including ${options.map(o => o.name).join(', ')}.`,
+                    title: insertTitle,
+                    description: insertDesc,
                     price: 0,
                     currency: currency,
                     image_urls: [],
@@ -153,6 +185,15 @@ router.post('/', authenticateToken, async (req, res) => {
                 .select();
 
             if (error) throw error;
+
+            // Fire-and-forget: translate in the background without blocking the response
+            const inserted = data[0];
+            if (inserted) {
+                translateFields({ title: insertTitle, description: insertDesc })
+                    .then(t => supabaseAdmin.from('services').update(t).eq('id', inserted.id))
+                    .catch(err => console.warn('[autoTranslate] POST standalone:', err.message));
+            }
+
             return res.status(201).json({ message: 'Standalone Service created!', services: data });
         }
 
@@ -172,6 +213,13 @@ router.post('/', authenticateToken, async (req, res) => {
         const { data, error } = await supabase.from('services').insert(servicesToInsert).select(); 
         if (error) throw error;
 
+        // Fire-and-forget: translate all inserted services in the background
+        (data || []).forEach(svc => {
+            translateFields({ title: svc.title, description: svc.description })
+                .then(t => supabaseAdmin.from('services').update(t).eq('id', svc.id))
+                .catch(err => console.warn('[autoTranslate] POST multi:', err.message));
+        });
+
         res.status(201).json({ message: 'Services created successfully!', services: data });
 
     } catch (error) {
@@ -187,6 +235,7 @@ router.post('/', authenticateToken, async (req, res) => {
 router.put('/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
     const providerId = req.user.id;
+    const lang = getLang(req);
     
     // 1. Deconstruct fields
     const { 
@@ -245,6 +294,21 @@ router.put('/:id', authenticateToken, async (req, res) => {
             updateData.edit_count = (existingService.edit_count || 0) + 1;
         }
 
+        // Auto-translate title / description if either is being updated
+        const needsTranslation = updateData.title !== undefined || updateData.description !== undefined;
+        if (needsTranslation) {
+            try {
+                const translations = await translateFields({
+                    title:       updateData.title       ?? existingService.title,
+                    description: updateData.description ?? existingService.description,
+                });
+                Object.assign(updateData, translations);
+            } catch (err) {
+                // Non-fatal — save proceeds without translations
+                console.warn('[autoTranslate] PUT translate failed:', err.message);
+            }
+        }
+
         const shouldUpdateServiceTable = hasServiceFieldUpdates;
         // 2. Update the Service Table
         let data = existingService;
@@ -297,7 +361,7 @@ router.put('/:id', authenticateToken, async (req, res) => {
 
         res.status(200).json({
             message: 'Service and schedule updated successfully!',
-            service: data,
+            service: localiseService(data, lang),
         });
 
     } catch (error) {
@@ -350,6 +414,7 @@ router.delete('/:id', authenticateToken, async (req, res) => {
  */
 router.get('/category/:categoryId', async (req, res) => {
     const { categoryId } = req.params;
+    const lang = getLang(req);
 
     try {
         // 1. Get details of the requested category (Check if it has a parent)
@@ -416,7 +481,7 @@ router.get('/category/:categoryId', async (req, res) => {
 
         res.status(200).json({
             message: 'Services fetched successfully!',
-            services: sortedServices, 
+            services: sortedServices.map(s => localiseService(s, lang)),
         });
 
     } catch (error) {
@@ -431,6 +496,7 @@ router.get('/category/:categoryId', async (req, res) => {
  */
 router.get('/provider/:providerId', async (req, res) => {
     const { providerId } = req.params;
+    const lang = getLang(req);
 
     try {
         const { data: services, error } = await supabase
@@ -456,7 +522,7 @@ router.get('/provider/:providerId', async (req, res) => {
         res.status(200).json({
             message: 'Services fetched by provider successfully!',
             provider_profile: profile || null,
-            services: services,
+            services: (services || []).map(s => localiseService(s, lang)),
         });
 
     } catch (error) {
@@ -472,6 +538,7 @@ router.get('/provider/:providerId', async (req, res) => {
  */
 router.get('/:id', async (req, res) => {
     const { id } = req.params;
+    const lang = getLang(req);
 
     try {
         const { data: service, error } = await supabase
@@ -491,7 +558,7 @@ router.get('/:id', async (req, res) => {
 
         res.status(200).json({
             message: 'Service fetched successfully!',
-            service: service,
+            service: localiseService(service, lang),
         });
 
     } catch (error) {

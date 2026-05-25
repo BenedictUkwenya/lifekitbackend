@@ -12,21 +12,21 @@
 const express = require('express');
 const router = express.Router();
 const { supabaseAdmin } = require('../config/supabase');
+const { t, getUserLang } = require('../utils/translate');
 
 // ── Helper: verify Vercel cron secret ───────────────────────────────────────
 function verifyCronSecret(req, res) {
   const secret = process.env.CRON_SECRET;
   if (!secret) {
-    // If no secret is configured, only allow in development
     if (process.env.NODE_ENV === 'production') {
-      res.status(403).json({ error: 'CRON_SECRET is not configured.' });
+      res.status(403).json({ error: t('errors.cronSecretMissing') });
       return false;
     }
     return true;
   }
   const provided = req.headers['authorization'];
   if (provided !== `Bearer ${secret}`) {
-    res.status(401).json({ error: 'Unauthorized.' });
+    res.status(401).json({ error: t('errors.unauthorized') });
     return false;
   }
   return true;
@@ -40,21 +40,23 @@ async function insertNotification(userId, title, message, type, referenceId = nu
   if (error) console.error(`[CRON] notification insert error for ${userId}:`, error);
 }
 
+// ── Helper: format date in a locale-aware way ────────────────────────────────
+function formatDate(date, lang) {
+  const localeMap = { en: 'en-US', ka: 'ka-GE', ru: 'ru-RU' };
+  const locale = localeMap[lang] || 'en-US';
+  return date.toLocaleDateString(locale, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
 // ── GET /cron/check-trials ────────────────────────────────────────────────────
-// Sends warnings 7, 3, and 1 day(s) before trial_end_date, and a post-expiry
-// notification on the day after it expires.
-// Safe to run multiple times per day — uses a `notified_*` flag approach via
-// the notification type string to avoid duplicates (Supabase dedup logic below).
 router.get('/check-trials', async (req, res) => {
   if (!verifyCronSecret(req, res)) return;
 
   try {
     const now = new Date();
 
-    // Fetch all profiles that have a trial_end_date set
     const { data: profiles, error } = await supabaseAdmin
       .from('profiles')
-      .select('id, full_name, trial_end_date')
+      .select('id, full_name, trial_end_date, language')
       .not('trial_end_date', 'is', null);
 
     if (error) throw error;
@@ -62,6 +64,7 @@ router.get('/check-trials', async (req, res) => {
     const results = { warnings: 0, expired: 0, skipped: 0 };
 
     for (const profile of profiles) {
+      const lang = getUserLang(profile);
       const trialEnd = new Date(profile.trial_end_date);
       const msLeft = trialEnd - now;
       const daysLeft = Math.ceil(msLeft / (1000 * 60 * 60 * 24));
@@ -70,12 +73,11 @@ router.get('/check-trials', async (req, res) => {
       let warningType = null;
       let warningDays = null;
 
-      if (daysLeft === 7) { warningType = 'trial_warning_7d'; warningDays = 7; }
+      if (daysLeft === 7)      { warningType = 'trial_warning_7d'; warningDays = 7; }
       else if (daysLeft === 3) { warningType = 'trial_warning_3d'; warningDays = 3; }
       else if (daysLeft === 1) { warningType = 'trial_warning_1d'; warningDays = 1; }
 
       if (warningType) {
-        // Dedup: skip if this exact notification was already sent today
         const { count } = await supabaseAdmin
           .from('notifications')
           .select('id', { count: 'exact', head: true })
@@ -86,9 +88,13 @@ router.get('/check-trials', async (req, res) => {
         if (count === 0) {
           await insertNotification(
             profile.id,
-            `⏳ Your Pro trial ends in ${warningDays} day${warningDays > 1 ? 's' : ''}`,
-            `Your free Pro trial expires on ${trialEnd.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}. ` +
-            `Upgrade to a paid plan to keep your 5 service slots, Pro AI, and reduced commission.`,
+            t('notifications.trialWarning.title', lang, {
+              days: warningDays,
+              plural: warningDays > 1 ? 's' : '',
+            }),
+            t('notifications.trialWarning.message', lang, {
+              date: formatDate(trialEnd, lang),
+            }),
             warningType,
           );
           results.warnings++;
@@ -99,7 +105,6 @@ router.get('/check-trials', async (req, res) => {
       }
 
       // ── Post-trial expiry notification ────────────────────────────────────
-      // daysLeft <= 0 means the trial has just expired (within the last 24 h)
       if (daysLeft <= 0 && daysLeft > -1) {
         const { count } = await supabaseAdmin
           .from('notifications')
@@ -111,9 +116,8 @@ router.get('/check-trials', async (req, res) => {
         if (count === 0) {
           await insertNotification(
             profile.id,
-            '🔔 Your free Pro trial has ended',
-            'Your 90-day launch trial is over. You have been moved to the Free plan (1 service, 8% commission). ' +
-            'Upgrade to Pro or Business to restore all features.',
+            t('notifications.trialExpired.title', lang),
+            t('notifications.trialExpired.message', lang),
             'trial_expired',
           );
           results.expired++;
@@ -132,10 +136,6 @@ router.get('/check-trials', async (req, res) => {
 });
 
 // ── GET /cron/check-inactivity ────────────────────────────────────────────────
-// Finds providers who:
-//   a) have at least 1 service but no bookings in the last 7 days, OR
-//   b) have 0 services (never posted)
-// and sends a single AI-nudge notification (deduplicated per 7-day window).
 router.get('/check-inactivity', async (req, res) => {
   if (!verifyCronSecret(req, res)) return;
 
@@ -144,29 +144,27 @@ router.get('/check-inactivity', async (req, res) => {
     const sevenDaysAgo = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString();
     const results = { nudged: 0, skipped: 0 };
 
-    // ── Case A: providers with services but no recent bookings ───────────────
     const { data: activeProviders } = await supabaseAdmin
       .from('profiles')
-      .select('id')
+      .select('id, language')
       .eq('is_service_provider', true);
 
     if (activeProviders) {
       for (const provider of activeProviders) {
-        // Check if they have any bookings in the last 7 days
+        const lang = getUserLang(provider);
+
         const { count: recentBookings } = await supabaseAdmin
           .from('bookings')
           .select('id', { count: 'exact', head: true })
           .eq('provider_id', provider.id)
           .gte('created_at', sevenDaysAgo);
 
-        // Check if they have any services at all
         const { count: serviceCount } = await supabaseAdmin
           .from('services')
           .select('id', { count: 'exact', head: true })
           .eq('provider_id', provider.id);
 
         if (serviceCount === 0) {
-          // No services — nudge to create first one
           const { count: alreadyNotified } = await supabaseAdmin
             .from('notifications')
             .select('id', { count: 'exact', head: true })
@@ -177,8 +175,8 @@ router.get('/check-inactivity', async (req, res) => {
           if (alreadyNotified === 0) {
             await insertNotification(
               provider.id,
-              '✨ Ready to start earning?',
-              'You haven\'t posted a service yet. Open the app and let AI suggest the best services for your skills and location — it only takes 2 minutes!',
+              t('notifications.nudgeNoServices.title', lang),
+              t('notifications.nudgeNoServices.message', lang),
               'ai_nudge_no_services',
             );
             results.nudged++;
@@ -186,7 +184,6 @@ router.get('/check-inactivity', async (req, res) => {
             results.skipped++;
           }
         } else if (recentBookings === 0) {
-          // Has services but no recent bookings — nudge to stay active
           const { count: alreadyNotified } = await supabaseAdmin
             .from('notifications')
             .select('id', { count: 'exact', head: true })
@@ -197,8 +194,8 @@ router.get('/check-inactivity', async (req, res) => {
           if (alreadyNotified === 0) {
             await insertNotification(
               provider.id,
-              '📈 Boost your visibility',
-              'You haven\'t received a booking in 7 days. Our AI has found new opportunities in your area — check them out in the AI Radar on your dashboard!',
+              t('notifications.nudgeInactive.title', lang),
+              t('notifications.nudgeInactive.message', lang),
               'ai_nudge_inactive',
             );
             results.nudged++;

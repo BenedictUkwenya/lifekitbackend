@@ -1,0 +1,39 @@
+{
+  "notifications": {
+    "trialWarning": {
+      "title": "⏳ Your Pro trial ends in {{days}} day{{plural}}",
+      "message": "Your free Pro trial expires on {{date}}. Upgrade to a paid plan to keep your 5 service slots, Pro AI, and reduced commission."
+    },
+    "trialExpired": {
+      "title": "🔔 Your free Pro trial has ended",
+      "message": "Your 90-day launch trial is over. You have been moved to the Free plan (1 service, 8% commission). Upgrade to Pro or Business to restore all features."
+    },
+    "nudgeNoServices": {
+      "title": "✨ Ready to start earning?",
+      "message": "You haven't posted a service yet. Open the app and let AI suggest the best services for your skills and location — it only takes 2 minutes!"
+    },
+    "nudgeInactive": {
+      "title": "📈 Boost your visibility",
+      "message": "You haven't received a booking in 7 days. Our AI has found new opportunities in your area — check them out in the AI Radar on your dashboard!"
+    }
+  },
+  "errors": {
+    "unauthorized": "Unauthorized.",
+    "forbidden": "Access denied.",
+    "notFound": "Resource not found.",
+    "serverError": "An internal error occurred.",
+    "invalidInput": "Invalid input provided.",
+    "cronSecretMissing": "CRON_SECRET is not configured."
+  },
+  "booking": {
+    "confirmed": "Your booking has been confirmed.",
+    "cancelled": "Your booking has been cancelled.",
+    "completed": "Your booking has been marked as completed.",
+    "reminder": "You have a booking coming up soon."
+  },
+  "wallet": {
+    "credited": "Your wallet has been credited.",
+    "debited": "Payment processed from your wallet.",
+    "topUpSuccess": "Wallet top-up successful."
+  }
+}

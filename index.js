@@ -48,7 +48,7 @@ app.use(cors({
     return callback(null, true);
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept-Language']
 }));
 
 // Middleware for JSON
@@ -82,13 +82,19 @@ app.use('/cron', cronRoutes);
 
 // --- SERVER STARTUP (Modified for Vercel) ---
 
-// Only run app.listen if we are NOT in production (i.e. running locally)
-// Vercel handles the server start automatically via the exported 'app'
+// Only run in development. Vercel handles startup automatically via the exported 'app'.
+// Use http.createServer directly so the server reference is kept in scope and the
+// event loop stays alive (Express 5 app.listen() returns a Promise and can exit early).
 if (process.env.NODE_ENV !== 'production') {
+  const http = require('http');
   const PORT = parseInt(process.env.PORT, 10) || 3000;
-  app.listen(PORT, () => {
+  const server = http.createServer(app);
+  server.listen(PORT, () => {
     console.log(`Server running locally on port ${PORT}`);
     console.log(`Supabase URL: ${process.env.SUPABASE_URL}`);
+  });
+  server.on('error', (err) => {
+    console.error('Server error:', err.message);
   });
 }
 
