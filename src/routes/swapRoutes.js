@@ -6,6 +6,29 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
+// ── Language helper (Accept-Language → en|ka|ru) ────────────────────────────
+function swapGetLang(req) {
+  const raw = (req.headers['accept-language'] || '')
+    .toString()
+    .toLowerCase()
+    .split(',')[0]
+    .split('-')[0]
+    .trim();
+  return ['en', 'ka', 'ru'].includes(raw) ? raw : 'en';
+}
+
+function swapLanguageName(lang) {
+  if (lang === 'ka') return 'Georgian (ქართული)';
+  if (lang === 'ru') return 'Russian (Русский)';
+  return 'English';
+}
+
+function swapLanguageInstruction(lang) {
+  if (lang === 'en') return 'Write all human-readable strings in clear, natural English.';
+  return `IMPORTANT: Write every human-readable string value in ${swapLanguageName(lang)}.
+Use proper native grammar and phrasing. Do NOT translate JSON keys.`;
+}
+
 const SWAP_FALLBACK_MODELS = [
   'gemini-flash-latest',
   'gemini-flash-lite-latest',
@@ -426,15 +449,24 @@ router.get('/board/ai-ranked', authenticateToken, async (req, res) => {
 
     if (!myServices || myServices.length === 0) {
       // No services yet — return board as-is with default score
-      return res.json({ board: board.map(b => ({ ...b, ai_relevance_score: 50, ai_relevance_reason: 'Potential match' })) });
+      const fallback = swapGetLang(req) === 'ka'
+        ? 'შესაძლო თავსებადობა'
+        : swapGetLang(req) === 'ru'
+          ? 'Возможное соответствие'
+          : 'Potential match';
+      return res.json({ board: board.map(b => ({ ...b, ai_relevance_score: 50, ai_relevance_reason: fallback })) });
     }
 
     // 3. Ask Gemini to score each board item against my services
+    const lang = swapGetLang(req);
     const systemPrompt = `You are a Skill Swap relevance engine for the LifeKit app.
 I will give you a list of "swap posts" (people offering a skill and wanting another in return) and the current user's own services.
 Score each swap post 0-100 for how relevant/useful it would be for this user to engage with, based on complementarity.
 Return ONLY a JSON array (no markdown, no explanation):
-[{"id":"...", "score": number, "reason": "1 short sentence"}]`;
+[{"id":"...", "score": number, "reason": "1 short sentence"}]
+
+${swapLanguageInstruction(lang)}
+The "reason" field is the only human-readable text — write it in the user's language.`;
 
     const userPrompt = `MY SERVICES:\n${(myServices || []).map(s => `- "${s.title}": ${s.description || 'N/A'}`).join('\n')}\n\nSWAP BOARD POSTS:\n${board.map(b => `[${b.id}] Offering "${b.proposer_service?.title}" — Wants "${b.target_category_name || 'anything'}"`).join('\n')}`;
 
@@ -450,11 +482,16 @@ Return ONLY a JSON array (no markdown, no explanation):
     const scoreMap = {};
     scores.forEach(s => { scoreMap[s.id] = s; });
 
+    const fallbackReason = lang === 'ka'
+      ? 'შესაძლო თავსებადობა'
+      : lang === 'ru'
+        ? 'Возможное соответствие'
+        : 'Potential match';
     const ranked = board
       .map(b => ({
         ...b,
         ai_relevance_score: scoreMap[b.id]?.score ?? 50,
-        ai_relevance_reason: scoreMap[b.id]?.reason ?? 'Potential match',
+        ai_relevance_reason: scoreMap[b.id]?.reason ?? fallbackReason,
       }))
       .sort((a, b) => b.ai_relevance_score - a.ai_relevance_score);
 

@@ -7,6 +7,51 @@ const { supabaseAdmin } = require('../config/supabase');
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 console.log("DEBUG: Gemini API Key loaded:", !!process.env.GEMINI_API_KEY);
 
+// ── Language helpers ────────────────────────────────────────────────────────
+// Reads the user's preferred language from the Accept-Language header
+// (sent by the Flutter app whenever the user changes language in Settings).
+// Falls back to English when missing or unsupported.
+const SUPPORTED_AI_LANGS = ['en', 'ka', 'ru'];
+
+function getLang(req) {
+  const raw = (req.headers['accept-language'] || '')
+    .toString()
+    .toLowerCase()
+    .split(',')[0]
+    .split('-')[0]
+    .trim();
+  return SUPPORTED_AI_LANGS.includes(raw) ? raw : 'en';
+}
+
+function languageName(lang) {
+  switch (lang) {
+    case 'ka':
+      return 'Georgian (ქართული)';
+    case 'ru':
+      return 'Russian (Русский)';
+    case 'en':
+    default:
+      return 'English';
+  }
+}
+
+/**
+ * Returns a strict instruction block that tells Gemini which language to
+ * write the human-readable text in. JSON keys / enum values stay English so
+ * the rest of the backend keeps parsing correctly.
+ */
+function languageInstruction(lang) {
+  if (lang === 'en') {
+    return 'Write every human-readable string in clear, natural English.';
+  }
+  const name = languageName(lang);
+  return `IMPORTANT — LANGUAGE REQUIREMENT:
+You MUST write every human-readable string value in ${name}.
+This applies to ALL natural-language text inside the JSON response (e.g. "reply", "task", "reason", "description", "title", "insight", "match_reason", "label", any message shown to the user, etc.).
+DO NOT translate JSON keys or enum/category values — keep those exactly as specified in the schema.
+Use proper ${name} grammar, punctuation, and native phrasing. Do not mix languages inside the same sentence.`;
+}
+
 // ── Middleware: Premium AI gate ─────────────────────────────────────────────
 // Allows: pro, business, OR any tier with an active trial_end_date.
 // Must run after authenticateToken.
@@ -99,8 +144,9 @@ router.post('/generate-service', authenticateToken, requirePremiumAI, async (req
   }
 
   try {
+    const lang = getLang(req);
     const rawText = await generateWithFallback(
-      SYSTEM_PROMPT,
+      `${SYSTEM_PROMPT}\n\n${languageInstruction(lang)}`,
       `User prompt: ${prompt.trim()}`
     );
 
@@ -142,6 +188,37 @@ function stripJsonFences(text) {
     .replace(/^```(?:json)?\s*/i, '')
     .replace(/\s*```$/i, '')
     .trim();
+}
+
+/**
+ * Translate an array of plain strings into the target language via Gemini.
+ * Returns the strings in the same order. On any failure, returns the original
+ * inputs untouched — translation should never break the live response.
+ */
+async function translateStrings(strings, targetLang) {
+  if (targetLang === 'en' || !Array.isArray(strings) || strings.length === 0) {
+    return strings;
+  }
+  const name = languageName(targetLang);
+  const prompt = `Translate each of the following English strings into ${name}.
+Return ONLY a JSON array of translated strings, in the SAME order as the input. No markdown, no extra text.
+
+Input:
+${JSON.stringify(strings)}`;
+  try {
+    const raw = await generateWithFallback(
+      `You are a professional translator. Translate the user-supplied strings into ${name} using natural, native phrasing. Preserve any proper nouns and product names (e.g. "LifeKit", "Gracia").`,
+      prompt
+    );
+    const parsed = JSON.parse(stripJsonFences(raw));
+    if (Array.isArray(parsed) && parsed.length === strings.length) {
+      return parsed.map((s, i) => (typeof s === 'string' && s.trim() ? s : strings[i]));
+    }
+    return strings;
+  } catch (err) {
+    console.warn('[ai] translateStrings failed:', err.message);
+    return strings;
+  }
 }
 
 /**
@@ -207,6 +284,7 @@ router.post('/chat', authenticateToken, requirePremiumAI, async (req, res) => {
     ]);
 
     // ── 2. Build dynamic system prompt ──────────────────────────────────────
+    const lang = getLang(req);
     const systemPrompt = `You are Gracia, a helpful, conversational assistant for the LifeKit app. Your goal is to help users find services, communities, and navigate the city.
 Here is the current live data from the LifeKit platform:
 SERVICES: ${JSON.stringify(services ?? [])}
@@ -222,7 +300,9 @@ You must respond in STRICT JSON format matching this schema:
   ]
 }
 For service actions, you MUST include the provider_id field from the service data. If no actions are relevant, return an empty array for actions.
-Do not include any explanation, markdown, or extra text outside the JSON object.`;
+Do not include any explanation, markdown, or extra text outside the JSON object.
+
+${languageInstruction(lang)}`;
 
     // ── 3. Build conversation contents for Gemini ────────────────────────────
     // Flatten prior history into a single context prefix so we avoid complex
@@ -284,6 +364,11 @@ router.post('/onboarding-plan', authenticateToken, async (req, res) => {
     supabaseAdmin.from('service_categories').select('name').limit(20),
   ]);
 
+  // NOTE: The canonical plan is always generated and stored in English so that
+  // the existing `localiseOnboardingPlan` (in userRoutes) can cache per-language
+  // translations against a stable source. The live response below is then
+  // localised to the caller's language before returning.
+  const lang = getLang(req);
   const systemPrompt = `You are the LifeKit Onboarding AI. Generate a 7-Day Success Plan for a new user.
 
 EXISTING COMMUNITIES: ${JSON.stringify(groups ?? [])}
@@ -293,6 +378,8 @@ Rules:
 1. For 'communities': if an existing community matches the user's interests, return its exact 'id' and set 'is_new' to false. If none match well, suggest a new one with 'id' set to null and 'is_new' set to true.
 2. For 'plan': each task MUST include an 'action_route' field chosen EXACTLY from this list: ["profile", "create_service", "explore", "wallet", "none"].
 3. For 'services_to_offer': suggest services using an existing category name where possible.
+
+Write all human-readable strings in clear, natural English. The backend will translate them to the user's language afterwards.
 
 You MUST return STRICT JSON matching this exact schema:
 {
@@ -337,19 +424,62 @@ Do not include any explanation, markdown, or extra text outside the JSON object.
       return res.status(502).json({ error: 'AI response did not match the expected format.' });
     }
 
-    // Persist plan to user's profile (fire-and-forget, non-blocking)
+    // Translate the live response into the caller's language (Gemini-powered).
+    // The canonical English plan is what we persist, but we also seed the
+    // translation cache so the next GET /users/profile in this language is
+    // instant (no second translation pass).
+    let livePlan = parsed.plan;
+    let liveCommunities = parsed.communities;
+    let liveServices = parsed.services_to_offer;
+    let translationCacheForLang = null;
+
+    if (lang !== 'en') {
+      try {
+        const taskStrings = parsed.plan.map((d) => d?.task || '');
+        const commReasonStrings = parsed.communities.map((c) => c?.reason || '');
+        const commNameStrings = parsed.communities.map((c) => c?.name || '');
+        const svcTitleStrings = parsed.services_to_offer.map((s) => s?.title || '');
+
+        const [tTasks, tReasons, tCommNames, tSvcTitles] = await Promise.all([
+          translateStrings(taskStrings, lang),
+          translateStrings(commReasonStrings, lang),
+          translateStrings(commNameStrings, lang),
+          translateStrings(svcTitleStrings, lang),
+        ]);
+
+        livePlan = parsed.plan.map((d, i) => ({ ...d, task: tTasks[i] }));
+        liveCommunities = parsed.communities.map((c, i) => ({
+          ...c,
+          name: tCommNames[i],
+          reason: tReasons[i],
+        }));
+        liveServices = parsed.services_to_offer.map((s, i) => ({
+          ...s,
+          title: tSvcTitles[i],
+        }));
+        translationCacheForLang = livePlan; // matches schema used by localiseOnboardingPlan
+      } catch (translateErr) {
+        console.warn('[ai] onboarding-plan live translation failed:', translateErr.message);
+      }
+    }
+
+    // Persist canonical English plan + (optionally) seed translation cache.
+    const updatePayload = { onboarding_plan: parsed.plan };
+    if (translationCacheForLang) {
+      updatePayload.onboarding_plan_translations = { [lang]: translationCacheForLang };
+    }
     supabaseAdmin
       .from('profiles')
-      .update({ onboarding_plan: parsed.plan })
+      .update(updatePayload)
       .eq('id', req.user.id)
       .then(({ error }) => {
         if (error) console.error('Failed to save onboarding_plan:', error.message);
       });
 
     return res.status(200).json({
-      plan: parsed.plan,
-      communities: parsed.communities,
-      services_to_offer: parsed.services_to_offer,
+      plan: livePlan,
+      communities: liveCommunities,
+      services_to_offer: liveServices,
     });
   } catch (err) {
     console.error('Gemini /onboarding-plan error:', err);
@@ -400,6 +530,7 @@ router.get('/opportunities', authenticateToken, requirePremiumAI, async (req, re
         : 'Cleaning, Tutoring, Hairdressing, Plumbing, Personal Chef, Pet Sitting, Laundry, Handyman, Grocery Shopping, Event Companion';
 
     // ── 3. Build Gemini prompt ───────────────────────────────────────────────
+    const lang = getLang(req);
     const systemPrompt = `You are the LifeKit Market Analyst. Your job is to help service providers find new ways to earn.
 I will provide you with the User's Skills, their Location, and the current Platform Trends.
 Compare them and find 'Market Gaps'—services the user is capable of offering but hasn't listed yet.
@@ -421,8 +552,11 @@ You MUST return STRICT JSON in this exact format:
     }
   ]
 }
-The "category" field MUST exactly match one of the category names from the Platform Trends list.
-Return between 3 and 6 opportunities. Do not include any explanation, markdown, or extra text outside the JSON object.`;
+The "category" field MUST exactly match one of the category names from the Platform Trends list (keep this value in English — it's an identifier).
+The "demand_level" field must stay exactly "High" or "Medium" (English enum).
+Return between 3 and 6 opportunities. Do not include any explanation, markdown, or extra text outside the JSON object.
+
+${languageInstruction(lang)}`;
 
     // ── 4. Call Gemini (with fallback cascade) ─────────────────────────────────────────
     const rawText = await generateWithFallback(null, systemPrompt);
@@ -487,6 +621,7 @@ router.get('/discovery', authenticateToken, requirePremiumAI, async (req, res) =
       profile?.interests || profile?.bio || 'General interests not specified';
 
     // ── 2. Build system prompt ────────────────────────────────────────────────
+    const lang = getLang(req);
     const systemPrompt = `You are the LifeKit Concierge. Your goal is to provide a 'Daily Discovery' list for the user.
 Based on the user's profile and the platform data provided, pick the 3 best things (can be an Event, a Service, or a Community) for them right now.
 Write a short 'Why for you' reason for each (e.g., 'Since you like music, this jazz event is perfect').
@@ -509,7 +644,10 @@ You MUST return STRICT JSON in this exact format:
     }
   ]
 }
-Return exactly 3 recommendations. Only reference items whose IDs appear in the data provided above. For service type items, you MUST include the provider_id from the service data. Do not include any explanation, markdown, or extra text outside the JSON object.`;
+Return exactly 3 recommendations. Only reference items whose IDs appear in the data provided above. For service type items, you MUST include the provider_id from the service data. The "type" value must stay exactly "event", "service" or "community" (English enum). Do not include any explanation, markdown, or extra text outside the JSON object.
+
+${languageInstruction(lang)}
+NOTE: Use the original title from the data when copying it (don't translate proper names of events / communities), but the "reason" field MUST be written in the user's language.`;
 
     // ── 3. Call Gemini (with fallback cascade) ─────────────────────────────────────────
     const rawText = await generateWithFallback(null, systemPrompt);
@@ -561,6 +699,7 @@ router.post('/city-pulse', authenticateToken, async (req, res) => {
     userBio = profile?.bio?.trim() || '';
   } catch (_) {}
 
+  const lang = getLang(req);
   const systemPrompt = `You are the LifeKit City Guide. I will provide a user's location, local time, and their profile.
 Generate a short (max 2 sentences), punchy 'Daily Insight' for the user.
 If it's morning, suggest starting the day. If it's evening, suggest relaxing or events.
@@ -572,7 +711,10 @@ LOCAL TIME: ${local_time.trim()}
 
 Return ONLY valid JSON in this exact format:
 { "insight": "...", "category_suggestion": "You MUST pick EXACTLY ONE from this list: 'Tourism', 'Food', 'Event', 'Hair', 'Health', 'Tech', 'Cleaning', 'Laundry', 'Plumbing'. Do not invent new categories." }
-Do not include markdown, code fences, or any explanation outside the JSON object.`;
+The "category_suggestion" value MUST remain in English (it's used as an identifier). The "insight" field is shown to the user.
+Do not include markdown, code fences, or any explanation outside the JSON object.
+
+${languageInstruction(lang)}`;
 
   try {
     const rawText = await generateWithFallback(null, systemPrompt);
@@ -591,12 +733,17 @@ Do not include markdown, code fences, or any explanation outside the JSON object
     }
 
     // Module 2.7 — Persist insight as a notification (fire-and-forget)
+    const notifTitle = lang === 'ka'
+      ? '✨ ქალაქის პულსი'
+      : lang === 'ru'
+        ? '✨ Пульс города'
+        : '✨ City Pulse';
     supabaseAdmin
       .from('notifications')
       .insert({
         user_id: userId,
         type: 'ai_city_pulse',
-        title: '✨ City Pulse',
+        title: notifTitle,
         message: parsed.insight,
         is_read: false,
       })
@@ -656,6 +803,7 @@ router.post('/skill-swap-matches', authenticateToken, requirePremiumAI, async (r
     }
 
     // 3. Ask AI to rank and score the candidates
+    const lang = getLang(req);
     const systemPrompt = `You are a Skill Swap matching engine for the LifeKit service marketplace.
 Your job is to rank a list of candidate services against the user's offered skill and return a JSON array.
 For each candidate, provide a match_score (0-100) where 100 means perfect complementary match, and a short match_reason (1 sentence).
@@ -664,7 +812,10 @@ Return ONLY a JSON array in this exact format — no markdown, no extra text:
 [
   { "service_id": "uuid", "match_score": number, "match_reason": "string" },
   ...
-]`;
+]
+
+${languageInstruction(lang)}
+Reminder: the "match_reason" field is the only human-readable string — write it in the user's language.`;
 
     const userPrompt = `My offered service:
 Title: ${myService.title}
@@ -679,13 +830,19 @@ Rank all candidates from most to least suitable for a skill swap.`;
     const rawText = await generateWithFallback(systemPrompt, userPrompt);
     const jsonText = stripJsonFences(rawText);
 
+    const fallbackReason = lang === 'ka'
+      ? 'შესაძლო თავსებადობა'
+      : lang === 'ru'
+        ? 'Возможное соответствие'
+        : 'Potential match';
+
     let rankingArray;
     try {
       rankingArray = JSON.parse(jsonText);
       if (!Array.isArray(rankingArray)) throw new Error('Not an array');
     } catch {
       // Fallback: return candidates unranked
-      rankingArray = candidates.map((c) => ({ service_id: c.id, match_score: 50, match_reason: 'Potential match' }));
+      rankingArray = candidates.map((c) => ({ service_id: c.id, match_score: 50, match_reason: fallbackReason }));
     }
 
     // 4. Merge AI rankings back into candidate objects
@@ -696,7 +853,7 @@ Rank all candidates from most to least suitable for a skill swap.`;
       .map(c => ({
         ...c,
         match_score: scoreMap[c.id]?.match_score ?? 50,
-        match_reason: scoreMap[c.id]?.match_reason ?? 'Potential match',
+        match_reason: scoreMap[c.id]?.match_reason ?? fallbackReason,
       }))
       .sort((a, b) => b.match_score - a.match_score);
 
@@ -731,7 +888,13 @@ router.post('/generate-swap-proposal', authenticateToken, requirePremiumAI, asyn
     return res.status(400).json({ error: 'All fields must be non-empty strings.' });
   }
 
-  const prompt = `Write a friendly, professional, 2-sentence direct message proposing a skill swap. I am offering "${myTitle}" and I want their "${targetTitle}". Address it to ${targetName}. Keep it casual but persuasive. Return ONLY the message text — no subject line, no labels, no quotes around the message.`;
+  const lang = getLang(req);
+  const langName = languageName(lang);
+  const langDirective = lang === 'en'
+    ? ''
+    : `\nWrite the entire message in ${langName} using natural, native phrasing. Do not include any English words.`;
+
+  const prompt = `Write a friendly, professional, 2-sentence direct message proposing a skill swap. I am offering "${myTitle}" and I want their "${targetTitle}". Address it to ${targetName}. Keep it casual but persuasive. Return ONLY the message text — no subject line, no labels, no quotes around the message.${langDirective}`;
 
   try {
     const text = await generateWithFallback(null, prompt);

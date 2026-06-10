@@ -4,12 +4,65 @@ const router = express.Router();
 // CHANGE 1: Import supabaseAdmin to bypass RLS for updates
 const { supabase, supabaseAdmin } = require('../config/supabase');
 const authenticateToken = require('../middleware/authMiddleware');
+const { translateText } = require('../utils/autoTranslate');
+
+// ── i18n helper ───────────────────────────────────────────────────────────────
+function getLang(req) {
+  const raw = req.headers['accept-language'] || 'en';
+  const code = raw.split(',')[0].split('-')[0].toLowerCase().trim();
+  return ['en', 'ka', 'ru'].includes(code) ? code : 'en';
+}
+
+/**
+ * Translate every day's `task` field of an onboarding_plan into the target
+ * language. Reads / writes the cached translations from a sibling JSONB column
+ * `onboarding_plan_translations` on the profiles table, e.g.
+ *   { ka: [...plan with ka task strings...], ru: [...] }
+ * so subsequent fetches are instant and don't hit MyMemory again.
+ * Falls back to the original plan if anything fails.
+ */
+async function localiseOnboardingPlan(profile, lang) {
+  if (!profile || lang === 'en') return profile;
+  const plan = profile.onboarding_plan;
+  if (!Array.isArray(plan) || plan.length === 0) return profile;
+
+  const cache = profile.onboarding_plan_translations || {};
+  if (cache[lang] && Array.isArray(cache[lang]) && cache[lang].length === plan.length) {
+    return { ...profile, onboarding_plan: cache[lang] };
+  }
+
+  try {
+    const translatedPlan = await Promise.all(
+      plan.map(async (day) => {
+        const taskText = day?.task;
+        if (!taskText) return day;
+        const translated = await translateText(taskText, lang);
+        return { ...day, task: translated };
+      })
+    );
+
+    const newCache = { ...cache, [lang]: translatedPlan };
+    supabaseAdmin
+      .from('profiles')
+      .update({ onboarding_plan_translations: newCache })
+      .eq('id', profile.id)
+      .then(({ error }) => {
+        if (error) console.warn('[i18n] Failed to cache onboarding plan translations:', error.message);
+      });
+
+    return { ...profile, onboarding_plan: translatedPlan };
+  } catch (err) {
+    console.warn('[i18n] localiseOnboardingPlan failed:', err.message);
+    return profile;
+  }
+}
 
 // =============================================================================
 // 1. GET PROFILE
 // =============================================================================
 router.get('/profile', authenticateToken, async (req, res) => {
   const userId = req.user.id;
+  const lang = getLang(req);
 
   try {
     const { data: profile, error } = await supabase
@@ -26,9 +79,11 @@ router.get('/profile', authenticateToken, async (req, res) => {
       return res.status(500).json({ error: 'Failed to fetch user profile.' });
     }
 
+    const localised = await localiseOnboardingPlan(profile, lang);
+
     res.status(200).json({
       message: 'User profile fetched successfully!',
-      profile: profile,
+      profile: localised,
     });
 
   } catch (error) {

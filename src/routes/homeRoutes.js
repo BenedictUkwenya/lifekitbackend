@@ -4,6 +4,38 @@ const router = express.Router();
 const { supabase } = require('../config/supabase');
 const authenticateToken = require('../middleware/authMiddleware'); 
 
+// ── i18n helpers ──────────────────────────────────────────────────────────────
+function getLang(req) {
+  const raw = req.headers['accept-language'] || 'en';
+  const code = raw.split(',')[0].split('-')[0].toLowerCase().trim();
+  return ['en', 'ka', 'ru'].includes(code) ? code : 'en';
+}
+
+function localiseCategory(cat, lang) {
+  if (!cat || lang === 'en') return cat;
+  return { ...cat, name: cat.name_translations?.[lang] || cat.name };
+}
+
+function localiseService(svc, lang) {
+  if (!svc || lang === 'en') return svc;
+  const cat = svc.service_categories;
+  return {
+    ...svc,
+    title:       svc.title_translations?.[lang]       || svc.title,
+    description: svc.description_translations?.[lang] || svc.description,
+    service_categories: cat ? localiseCategory(cat, lang) : cat,
+  };
+}
+
+function localiseOffer(offer, lang) {
+  if (!offer || lang === 'en') return offer;
+  return {
+    ...offer,
+    title:       offer.title_translations?.[lang]       || offer.title,
+    description: offer.description_translations?.[lang] || offer.description,
+  };
+}
+
 const normalizeTier = (tier) =>
   (typeof tier === 'string' ? tier.toLowerCase() : 'free');
 
@@ -17,6 +49,7 @@ const getTierWeight = (tier) => {
 
 // 1. Get Active Offers/Banners (Public)
 router.get('/offers', async (req, res) => {
+  const lang = getLang(req);
   try {
     const { data: offers, error } = await supabase
       .from('offers')
@@ -30,7 +63,7 @@ router.get('/offers', async (req, res) => {
 
     res.status(200).json({
       message: 'Active offers fetched successfully!',
-      offers: offers,
+      offers: (offers || []).map(o => localiseOffer(o, lang)),
     });
   } catch (error) {
     console.error('Offers Error:', error.message);
@@ -41,12 +74,13 @@ router.get('/offers', async (req, res) => {
 // 2. Get Popular Services (Public)
 // 2. Get Popular Services (Public & Dynamic)
 router.get('/popular-services', async (req, res) => {
+  const lang = getLang(req);
   try {
     // 1. Fetch active services with provider subscription tier
     let { data: services, error } = await supabase
       .from('services')
       .select(
-        '*, profiles(id, full_name, profile_picture_url, subscription_tier), service_categories(name)',
+        '*, profiles(id, full_name, profile_picture_url, subscription_tier), service_categories(name, name_translations)',
       )
       .eq('status', 'active')
       .limit(120);
@@ -70,7 +104,7 @@ router.get('/popular-services', async (req, res) => {
 
     res.status(200).json({
       message: 'Popular services fetched successfully!',
-      services: services.slice(0, 6),
+      services: services.slice(0, 6).map(s => localiseService(s, lang)),
     });
   } catch (error) {
     console.error('Popular Services Error:', error.message);
@@ -78,6 +112,7 @@ router.get('/popular-services', async (req, res) => {
   }
 });
 router.get('/explore', async (req, res) => {
+  const lang = getLang(req);
   try {
     const [
       featuredProvidersResult,
@@ -96,7 +131,7 @@ router.get('/explore', async (req, res) => {
       supabase
         .from('services')
         .select(
-          '*, profiles(id, full_name, profile_picture_url, subscription_tier), service_categories(name)',
+          '*, profiles(id, full_name, profile_picture_url, subscription_tier), service_categories(name, name_translations)',
         )
         .eq('status', 'active')
         .limit(200),
@@ -107,7 +142,7 @@ router.get('/explore', async (req, res) => {
     if (servicesResult.error) throw servicesResult.error;
 
     const featuredProviders = featuredProvidersResult.data || [];
-    const categories = categoriesResult.data || [];
+    const categories = (categoriesResult.data || []).map(c => localiseCategory(c, lang));
     let services = servicesResult.data || [];
 
     services.sort((a, b) => {
@@ -124,7 +159,7 @@ router.get('/explore', async (req, res) => {
       message: 'Explore feed fetched successfully!',
       featured_providers: featuredProviders,
       categories: categories,
-      all_services: services,
+      all_services: services.map(s => localiseService(s, lang)),
     });
   } catch (error) {
     console.error('Explore Error:', error.message);
@@ -134,6 +169,7 @@ router.get('/explore', async (req, res) => {
 // 3. Get ROOT Service Categories (Main Page)
 // This only returns categories that DO NOT have a parent.
 router.get('/categories', async (req, res) => {
+  const lang = getLang(req);
   try {
     const { data: categories, error } = await supabase
       .from('service_categories')
@@ -145,7 +181,7 @@ router.get('/categories', async (req, res) => {
 
     res.status(200).json({
       message: 'Root categories fetched successfully!',
-      categories: categories,
+      categories: (categories || []).map(c => localiseCategory(c, lang)),
     });
   } catch (error) {
     console.error('Categories Error:', error.message);
@@ -155,6 +191,7 @@ router.get('/categories', async (req, res) => {
 
 // 4. Get SUB-Categories (When a Main Category is clicked)
 router.get('/categories/children/:parentId', async (req, res) => {
+  const lang = getLang(req);
   const { parentId } = req.params;
   try {
     const { data: categories, error } = await supabase
@@ -167,7 +204,7 @@ router.get('/categories/children/:parentId', async (req, res) => {
 
     res.status(200).json({
       message: 'Sub-categories fetched successfully!',
-      categories: categories,
+      categories: (categories || []).map(c => localiseCategory(c, lang)),
     });
   } catch (error) {
     console.error('Sub-Categories Error:', error.message);
@@ -178,6 +215,7 @@ router.get('/categories/children/:parentId', async (req, res) => {
 // 5. Deep Global Search (For Clients)
 // Searches: Service titles, Category names, and Standalone JSON options
 router.get('/search', async (req, res) => {
+    const lang = getLang(req);
     const { query } = req.query; 
     if (!query || query.trim() === '') return res.status(400).json({ error: 'Query required.' });
 
@@ -197,7 +235,7 @@ router.get('/search', async (req, res) => {
             .select(`
                 *,
                 profiles!provider_id (id, full_name, profile_picture_url),
-                service_categories (id, name)
+                service_categories (id, name, name_translations)
             `)
             .eq('status', 'active')
             .or(`title.ilike.%${query}%, description.ilike.%${query}%`);
@@ -234,7 +272,7 @@ router.get('/search', async (req, res) => {
                 .select(`
                     *,
                     profiles!provider_id (id, full_name, profile_picture_url),
-                    service_categories (id, name)
+                    service_categories (id, name, name_translations)
                 `)
                 .eq('status', 'active') // Ensure active
                 .in('category_id', matchedCatIds);
@@ -260,7 +298,7 @@ router.get('/search', async (req, res) => {
 
         res.status(200).json({
             message: `Deep search results for "${query}"`,
-            services: uniqueServices,
+            services: uniqueServices.map(s => localiseService(s, lang)),
             providers: providers || [],
         });
     } catch (error) {
@@ -282,6 +320,7 @@ router.get('/recent-searches', authenticateToken, async (req, res) => {
 // 7. NEW: Category Search (For Providers Creating Services - Dropdown)
 // Allows searching "Socket" and finding "Electrical > Socket Repair"
 router.get('/categories/search/dropdown', async (req, res) => {
+    const lang = getLang(req);
     const { query } = req.query;
     if (!query) return res.status(400).json({ error: "Query required" });
 
@@ -292,6 +331,7 @@ router.get('/categories/search/dropdown', async (req, res) => {
             .select(`
                 id, 
                 name, 
+                name_translations,
                 is_standalone, 
                 parent_category_id
             `) 
@@ -300,7 +340,7 @@ router.get('/categories/search/dropdown', async (req, res) => {
 
         if (error) throw error;
 
-        res.json({ categories: data });
+        res.json({ categories: (data || []).map(c => localiseCategory(c, lang)) });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
