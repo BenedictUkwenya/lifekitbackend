@@ -238,7 +238,7 @@ router.post('/forgot-password', async (req, res) => {
 
   const MOBILE_REDIRECT = 'io.supabase.lifekit://reset-password';
   const WEB_REDIRECT_DEFAULT =
-    process.env.PROVIDER_WEB_RESET_URL || 'https://lifekitweb.vercel.app/reset-password';
+    process.env.PROVIDER_WEB_RESET_URL || 'https://www.lifekithub.com/reset-password';
 
   const redirectTo =
     redirect_to || (source === 'mobile' ? MOBILE_REDIRECT : WEB_REDIRECT_DEFAULT);
