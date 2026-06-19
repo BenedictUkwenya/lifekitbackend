@@ -284,10 +284,14 @@ router.get('/reset-password', async (req, res) => {
  * Finalizes the password reset by applying the new password using the access token.
  */
 router.post('/reset-password', async (req, res) => {
-  const { new_password, access_token, refresh_token } = req.body;
+  const { new_password, access_token, refresh_token, code } = req.body;
 
-  if (!new_password || !access_token) {
-    return res.status(400).json({ error: 'New password and access token are required.' });
+  if (!new_password) {
+    return res.status(400).json({ error: 'New password is required.' });
+  }
+
+  if (!access_token && !code) {
+    return res.status(400).json({ error: 'Reset link is invalid or expired. Please request a new one.' });
   }
 
   if (new_password.length < 6) {
@@ -295,14 +299,44 @@ router.post('/reset-password', async (req, res) => {
   }
 
   try {
-    // 1. Set the session with the temporary tokens from the reset link
-    await supabase.auth.setSession({
-      access_token,
-      refresh_token: refresh_token || '',
-    });
+    const { createClient } = require('@supabase/supabase-js');
+    const supabaseClient = createClient(
+      process.env.SUPABASE_URL,
+      process.env.SUPABASE_ANON_KEY,
+      {
+        auth: {
+          persistSession: false,
+          autoRefreshToken: false,
+          detectSessionInUrl: false,
+        },
+      }
+    );
 
-    // 2. Update the user's password using the active session
-    const { data, error } = await supabase.auth.updateUser({ password: new_password });
+    if (code) {
+      const { data: exchangeData, error: exchangeError } =
+        await supabaseClient.auth.exchangeCodeForSession(code);
+
+      if (exchangeError || !exchangeData.session) {
+        console.error('Supabase code exchange error:', exchangeError?.message);
+        return res.status(400).json({
+          error: exchangeError?.message || 'Reset link is invalid or expired. Please request a new one.',
+        });
+      }
+    } else {
+      const { data: sessionData, error: sessionError } = await supabaseClient.auth.setSession({
+        access_token,
+        refresh_token: refresh_token || '',
+      });
+
+      if (sessionError || !sessionData.session) {
+        console.error('Supabase setSession error:', sessionError?.message);
+        return res.status(400).json({
+          error: sessionError?.message || 'Reset link is invalid or expired. Please request a new one.',
+        });
+      }
+    }
+
+    const { data, error } = await supabaseClient.auth.updateUser({ password: new_password });
 
     if (error) {
       console.error('Supabase update password error:', error.message);
@@ -313,7 +347,6 @@ router.post('/reset-password', async (req, res) => {
       message: 'Password successfully updated! You can now log in with your new password.',
       user: data.user,
     });
-
   } catch (error) {
     console.error('Unexpected password reset error:', error.message);
     res.status(500).json({ error: 'Internal server error during password reset.' });
