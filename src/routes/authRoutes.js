@@ -227,19 +227,25 @@ router.post('/login', async (req, res) => {
 /**
  * 4. POST /auth/forgot-password
  * Sends a password reset link to the user's email.
+ * Accepts optional redirect_to, or source ('web' | 'mobile') to pick the right redirect URL.
  */
 router.post('/forgot-password', async (req, res) => {
-  const { email } = req.body;
+  const { email, redirect_to, source } = req.body;
 
-  if (!email) {
-    return res.status(400).json({ error: 'Email is required.' });
+  if (!email || !email.includes('@')) {
+    return res.status(400).json({ error: 'A valid email address is required.' });
   }
 
+  const MOBILE_REDIRECT = 'io.supabase.lifekit://reset-password';
+  const WEB_REDIRECT_DEFAULT =
+    process.env.PROVIDER_WEB_RESET_URL || 'https://lifekitweb.vercel.app/reset-password';
+
+  const redirectTo =
+    redirect_to || (source === 'mobile' ? MOBILE_REDIRECT : WEB_REDIRECT_DEFAULT);
+
   try {
-    // Supabase sends a password reset email
-    const { error } = await supabase.auth.resetPasswordForEmail(email, {
-      // The URL the user is redirected to after clicking the reset link
-      redirectTo: 'http://localhost:3000/auth/reset-password' 
+    const { error } = await supabase.auth.resetPasswordForEmail(email.trim().toLowerCase(), {
+      redirectTo,
     });
 
     if (error) {
@@ -248,9 +254,8 @@ router.post('/forgot-password', async (req, res) => {
     }
 
     res.status(200).json({
-      message: 'Password reset email sent! Check your inbox for instructions.',
+      message: 'If an account with that email exists, a password reset link has been sent.',
     });
-
   } catch (error) {
     console.error('Unexpected forgot password error:', error.message);
     res.status(500).json({ error: 'Internal server error during forgot password.' });
@@ -279,15 +284,22 @@ router.get('/reset-password', async (req, res) => {
  * Finalizes the password reset by applying the new password using the access token.
  */
 router.post('/reset-password', async (req, res) => {
-  const { new_password, access_token } = req.body; 
+  const { new_password, access_token, refresh_token } = req.body;
 
   if (!new_password || !access_token) {
     return res.status(400).json({ error: 'New password and access token are required.' });
   }
 
+  if (new_password.length < 6) {
+    return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+  }
+
   try {
-    // 1. Set the session with the temporary access_token from the reset link
-    await supabase.auth.setSession({ access_token: access_token, refresh_token: '' }); 
+    // 1. Set the session with the temporary tokens from the reset link
+    await supabase.auth.setSession({
+      access_token,
+      refresh_token: refresh_token || '',
+    });
 
     // 2. Update the user's password using the active session
     const { data, error } = await supabase.auth.updateUser({ password: new_password });
@@ -390,33 +402,6 @@ router.post('/refresh-token', async (req, res) => {
   }
 });
 
-/**
- * 9. POST /auth/forgot-password
- * Sends a password reset email via Supabase.
- */
-router.post('/forgot-password', async (req, res) => {
-  const { email } = req.body;
-
-  if (!email || !email.includes('@')) {
-    return res.status(400).json({ error: 'A valid email address is required.' });
-  }
-
-  try {
-    const { error } = await supabase.auth.resetPasswordForEmail(email.trim().toLowerCase(), {
-      redirectTo: 'lifekit://reset-password',
-    });
-
-    if (error) {
-      return res.status(400).json({ error: error.message });
-    }
-
-    // Always return success to avoid email enumeration attacks
-    res.status(200).json({ message: 'If an account with that email exists, a password reset link has been sent.' });
-  } catch (error) {
-    console.error('Forgot Password Error:', error.message);
-    res.status(500).json({ error: 'Internal server error.' });
-  }
-});
 
 /**
  * 10. PUT /auth/update-password
