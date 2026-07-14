@@ -108,6 +108,7 @@ async function notifyUser({
       message,
       lang,
       actionUrl: url,
+      type,
     }).catch((err) => {
       console.error(`[notificationService] Email failed for ${userId}:`, err.message);
     });

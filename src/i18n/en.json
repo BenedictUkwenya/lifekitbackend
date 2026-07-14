@@ -1,25 +1,32 @@
 {
   "emails": {
     "common": {
-      "footer": "You received this email because you have a LifeKit account. © LifeKit"
+      "footer": "You received this email because you have a LifeKit account. © LifeKit",
+      "tagline": "Your life, anywhere. Figured out.",
+      "unsubscribe": "Manage email preferences"
     },
     "signupOtp": {
       "subject": "Your LifeKit verification code",
       "title": "Welcome, {{name}}!",
-      "intro": "Enter this code in the app to verify your email and complete registration:",
-      "expiry": "This code expires in 1 hour. If you did not sign up, you can ignore this email."
+      "subtitle": "You're one step away from joining LifeKit",
+      "intro": "Enter this code to verify your email and complete your registration:",
+      "expiry": "This code expires in 1 hour. If you did not sign up, you can safely ignore this email."
     },
     "passwordReset": {
       "subject": "Reset your LifeKit password",
-      "title": "Password reset",
-      "intro": "We received a request to reset your password. Click the button below to choose a new one.",
-      "ignore": "If you did not request this, you can safely ignore this email.",
-      "cta": "Reset password"
+      "title": "Reset your password",
+      "intro": "We received a request to reset your password. Click the button below to choose a new one. This link expires in 1 hour.",
+      "ignore": "If you did not request this, no action is needed — your account is safe.",
+      "cta": "Reset My Password"
     },
     "notification": {
       "greeting": "Hi {{name}},",
       "defaultName": "there",
-      "cta": "Open LifeKit"
+      "cta": "Open LifeKit",
+      "ctaSwap": "View Swap",
+      "ctaBooking": "View Booking",
+      "ctaComeBack": "Come Back",
+      "ctaUpgrade": "Upgrade Now"
     }
   },
   "notifications": {
