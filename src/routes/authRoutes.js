@@ -129,10 +129,18 @@ router.post('/signup', async (req, res) => {
 
         const { error: profileError } = await supabaseAdmin
             .from('profiles')
-            .upsert(profilePayload);
+            .upsert(profilePayload, { onConflict: 'id' });
             
         if (profileError) {
-            console.warn("Manual profile creation warning:", profileError.message);
+            console.warn("Manual profile upsert warning:", profileError.message);
+            // Fallback: try explicit update in case trigger already created the row
+            const { error: updateError } = await supabaseAdmin
+                .from('profiles')
+                .update(profilePayload)
+                .eq('id', linkData.user.id);
+            if (updateError) {
+                console.warn("Profile update fallback warning:", updateError.message);
+            }
         }
     }
 
