@@ -3,6 +3,8 @@ const router = express.Router();
 const { supabaseAdmin } = require('../config/supabase');
 const authenticateToken = require('../middleware/authMiddleware');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { t, getUserLang } = require('../utils/translate');
+const { notifyUser } = require('../services/notificationService');
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
@@ -51,22 +53,6 @@ async function generateSwapAI(systemInstruction, userPrompt) {
 
 function stripFences(text) {
   return text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Helper: send a realtime-style notification
-// ─────────────────────────────────────────────────────────────────────────────
-async function notify(userId, title, message, type, referenceId) {
-  try {
-    await supabaseAdmin.from('notifications').insert({
-      user_id: userId,
-      title,
-      message,
-      type,
-      reference_id: referenceId,
-      is_read: false,
-    });
-  } catch (_) {}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -145,14 +131,23 @@ router.post('/', authenticateToken, async (req, res) => {
 
     if (insertErr) throw insertErr;
 
-    // Notify target
-    await notify(
-      target_user_id,
-      '🤝 New Skill Swap Proposal!',
-      `${req.user.full_name || 'Someone'} wants to swap "${myService.title}" with you.`,
-      'swap_proposal',
-      swap.id
-    );
+    const { data: targetProfile } = await supabaseAdmin
+      .from('profiles')
+      .select('language')
+      .eq('id', target_user_id)
+      .maybeSingle();
+    const targetLang = getUserLang(targetProfile);
+    const proposerName = req.user.full_name || 'Someone';
+    await notifyUser({
+      userId: target_user_id,
+      title: t('notifications.swapProposal.title', targetLang),
+      message: t('notifications.swapProposal.message', targetLang, {
+        name: proposerName,
+        service: myService.title,
+      }),
+      type: 'swap_proposal',
+      referenceId: swap.id,
+    });
 
     return res.status(201).json({ swap });
   } catch (err) {
@@ -339,14 +334,20 @@ router.put('/:id/accept', authenticateToken, async (req, res) => {
 
     if (updateErr) throw updateErr;
 
-    // Notify proposer
-    await notify(
-      swap.proposer_id,
-      '🎉 Swap Accepted!',
-      'Your Skill Swap proposal was accepted! Check your bookings.',
-      'swap_accepted',
-      swapId
-    );
+    const { data: proposerProfile } = await supabaseAdmin
+      .from('profiles')
+      .select('language')
+      .eq('id', swap.proposer_id)
+      .maybeSingle();
+    const proposerLang = getUserLang(proposerProfile);
+
+    await notifyUser({
+      userId: swap.proposer_id,
+      title: t('notifications.swapAccepted.title', proposerLang),
+      message: t('notifications.swapAccepted.message', proposerLang),
+      type: 'swap_accepted',
+      referenceId: swapId,
+    });
 
     return res.json({ swap: updatedSwap, booking });
   } catch (err) {
@@ -377,13 +378,20 @@ router.put('/:id/decline', authenticateToken, async (req, res) => {
       .update({ status: 'declined', updated_at: new Date().toISOString() })
       .eq('id', swapId);
 
-    await notify(
-      swap.proposer_id,
-      '😔 Swap Declined',
-      'Your Skill Swap proposal was declined. Try another provider!',
-      'swap_declined',
-      swapId
-    );
+    const { data: proposerProfile } = await supabaseAdmin
+      .from('profiles')
+      .select('language')
+      .eq('id', swap.proposer_id)
+      .maybeSingle();
+    const proposerLang = getUserLang(proposerProfile);
+
+    await notifyUser({
+      userId: swap.proposer_id,
+      title: t('notifications.swapDeclined.title', proposerLang),
+      message: t('notifications.swapDeclined.message', proposerLang),
+      type: 'swap_declined',
+      referenceId: swapId,
+    });
 
     return res.json({ message: 'Swap declined.' });
   } catch (err) {

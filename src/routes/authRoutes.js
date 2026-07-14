@@ -1,10 +1,26 @@
 // src/routes/authRoutes.js
 const express = require('express');
 const router = express.Router();
-// Import the Supabase client initialized in config/supabase.js
 const { supabase, supabaseAdmin } = require('../config/supabase');
 const authenticateToken = require('../middleware/authMiddleware');
-// --- Authentication Endpoints ---
+const emailService = require('../services/emailService');
+
+function normalizeLang(raw) {
+  const lang = String(raw || 'en').toLowerCase().split('-')[0];
+  return ['en', 'ka', 'ru'].includes(lang) ? lang : 'en';
+}
+
+async function findAuthUserByEmail(email) {
+  let page = 1;
+  while (true) {
+    const { data, error } = await supabaseAdmin.auth.admin.listUsers({ page, perPage: 1000 });
+    if (error) throw error;
+    const user = data.users.find((u) => u.email === email);
+    if (user) return user;
+    if (data.users.length < 1000) return null;
+    page += 1;
+  }
+}
 
 /**
  * 1. POST /auth/signup
@@ -30,8 +46,8 @@ const authenticateToken = require('../middleware/authMiddleware');
  * Handles user registration with a pre-signup duplicate email check.
  */
 router.post('/signup', async (req, res) => {
-  // 1. Deconstruct inputs
-  let { email, password, confirm_password, full_name, is_provider_signup, is_web_signup } = req.body;
+  let { email, password, confirm_password, full_name, is_provider_signup, is_web_signup, language } = req.body;
+  const lang = normalizeLang(language);
 
   // --- SANITIZATION ---
   if (email) {
@@ -62,56 +78,44 @@ router.post('/signup', async (req, res) => {
   }
 
   try {
-    // --- STEP 1: CHECK DUPLICATE EMAIL (PRE-SIGNUP) ---
-    // We use listUsers to search for this email. 
-    // Note: listUsers is an Admin function, so we use supabaseAdmin.
-    const { data: existingUsers, error: checkError } = await supabaseAdmin.auth.admin.listUsers();
-    
-    if (checkError) {
-      console.error('Error checking existing users:', checkError.message);
-      throw checkError;
+    const existingUser = await findAuthUserByEmail(email);
+
+    if (existingUser?.email_confirmed_at) {
+      return res.status(409).json({ error: 'Email is already registered. Please login.' });
     }
 
-    // Filter the list to find a match
-    const userExists = existingUsers.users.some(u => u.email === email);
-
-    if (userExists) {
-        return res.status(409).json({ error: 'Email is already registered. Please login.' });
-    }
-
-    // --- STEP 2: SUPABASE AUTH SIGNUP ---
-    const { data, error } = await supabase.auth.signUp({
-      email: email,
-      password: password,
+    const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
+      type: 'signup',
+      email,
+      password,
       options: {
-        // Save name in Auth Metadata as a backup
-        data: {
-          full_name: full_name, 
-        },
-      }
+        data: { full_name },
+      },
     });
 
-    if (error) {
-      console.error('Supabase signup error:', error.message);
-      return res.status(400).json({ error: error.message });
+    if (linkError) {
+      console.error('Supabase generateLink signup error:', linkError.message);
+      return res.status(400).json({ error: linkError.message });
     }
 
-    // --- STEP 3: PROFILE CREATION SAFETY NET ---
-    // Manually create/update the profile row immediately using Admin privileges.
-    // This ensures the row exists in 'public.profiles' with the required full_name.
-    if (data.user) {
-        // Early-adopter strategy: web provider signups get Pro tier free for 1 year
+    const otp = linkData?.properties?.email_otp;
+    if (!otp) {
+      console.error('Supabase generateLink signup: missing email_otp');
+      return res.status(500).json({ error: 'Failed to generate verification code.' });
+    }
+
+    if (linkData.user) {
         const isEarlyAdopterProvider = is_provider_signup === true && is_web_signup === true;
 
-        // All normal app signups get a 90-day Pro trial (3% commission, up to 5 services)
         const trialEndDate = !isEarlyAdopterProvider
             ? new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString()
             : null;
 
         const profilePayload = {
-            id: data.user.id,
+            id: linkData.user.id,
             email: email,
             full_name: full_name,
+            language: lang,
             is_service_provider: isEarlyAdopterProvider ? true : false,
             subscription_tier: isEarlyAdopterProvider ? 'pro' : 'free',
             is_founding_member: true,
@@ -128,14 +132,17 @@ router.post('/signup', async (req, res) => {
             .upsert(profilePayload);
             
         if (profileError) {
-            // Log a warning but don't fail the request (Database Trigger might have already handled it)
             console.warn("Manual profile creation warning:", profileError.message);
         }
     }
 
+    emailService.sendSignupOtpEmail({ email, fullName: full_name, otp, lang }).catch((err) => {
+      console.error('Signup OTP email failed:', err.message);
+    });
+
     res.status(200).json({
       message: 'Registration successful! Please check your email for confirmation.',
-      user_id: data.user?.id,
+      user_id: linkData.user?.id,
       email: email,
     });
 
@@ -212,6 +219,11 @@ router.post('/login', async (req, res) => {
       .eq('id', data.user.id)
       .single();
 
+    await supabaseAdmin
+      .from('profiles')
+      .update({ last_active_at: new Date().toISOString() })
+      .eq('id', data.user.id);
+
     return res.status(200).json({
       message: 'Login successful!',
       user: data.user,
@@ -230,7 +242,8 @@ router.post('/login', async (req, res) => {
  * Accepts optional redirect_to, or source ('web' | 'mobile') to pick the right redirect URL.
  */
 router.post('/forgot-password', async (req, res) => {
-  const { email, redirect_to, source } = req.body;
+  const { email, redirect_to, source, language } = req.body;
+  const lang = normalizeLang(language);
 
   if (!email || !email.includes('@')) {
     return res.status(400).json({ error: 'A valid email address is required.' });
@@ -244,13 +257,25 @@ router.post('/forgot-password', async (req, res) => {
     redirect_to || (source === 'mobile' ? MOBILE_REDIRECT : WEB_REDIRECT_DEFAULT);
 
   try {
-    const { error } = await supabase.auth.resetPasswordForEmail(email.trim().toLowerCase(), {
-      redirectTo,
+    const normalizedEmail = email.trim().toLowerCase();
+
+    const { data: linkData, error } = await supabaseAdmin.auth.admin.generateLink({
+      type: 'recovery',
+      email: normalizedEmail,
+      options: { redirectTo },
     });
 
     if (error) {
-      console.error('Supabase forgot password error:', error.message);
-      return res.status(400).json({ error: error.message });
+      console.error('Supabase generateLink recovery error:', error.message);
+      // Do not reveal whether the email exists
+    } else if (linkData?.properties?.action_link) {
+      emailService.sendPasswordResetEmail({
+        email: normalizedEmail,
+        resetLink: linkData.properties.action_link,
+        lang,
+      }).catch((err) => {
+        console.error('Password reset email failed:', err.message);
+      });
     }
 
     res.status(200).json({

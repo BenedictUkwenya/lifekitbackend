@@ -20,6 +20,10 @@
     {
       "path": "/cron/check-inactivity",
       "schedule": "0 10 * * 1"
+    },
+    {
+      "path": "/cron/check-user-inactivity",
+      "schedule": "0 9 * * 3"
     }
   ]
 }

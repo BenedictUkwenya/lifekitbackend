@@ -1,4 +1,27 @@
 {
+  "emails": {
+    "common": {
+      "footer": "You received this email because you have a LifeKit account. © LifeKit"
+    },
+    "signupOtp": {
+      "subject": "Your LifeKit verification code",
+      "title": "Welcome, {{name}}!",
+      "intro": "Enter this code in the app to verify your email and complete registration:",
+      "expiry": "This code expires in 1 hour. If you did not sign up, you can ignore this email."
+    },
+    "passwordReset": {
+      "subject": "Reset your LifeKit password",
+      "title": "Password reset",
+      "intro": "We received a request to reset your password. Click the button below to choose a new one.",
+      "ignore": "If you did not request this, you can safely ignore this email.",
+      "cta": "Reset password"
+    },
+    "notification": {
+      "greeting": "Hi {{name}},",
+      "defaultName": "there",
+      "cta": "Open LifeKit"
+    }
+  },
   "notifications": {
     "trialWarning": {
       "title": "⏳ Your Pro trial ends in {{days}} day{{plural}}",
@@ -15,6 +38,51 @@
     "nudgeInactive": {
       "title": "📈 Boost your visibility",
       "message": "You haven't received a booking in 7 days. Our AI has found new opportunities in your area — check them out in the AI Radar on your dashboard!"
+    },
+    "weMissYou": {
+      "title": "We miss you at LifeKit 💜",
+      "message": "It's been a while since you visited. Come back and discover new services, swaps, and community updates waiting for you."
+    },
+    "swapProposal": {
+      "title": "🤝 New Skill Swap Proposal!",
+      "message": "{{name}} wants to swap \"{{service}}\" with you."
+    },
+    "swapAccepted": {
+      "title": "🎉 Swap Accepted!",
+      "message": "Your Skill Swap proposal was accepted! Check your bookings."
+    },
+    "swapDeclined": {
+      "title": "😔 Swap Declined",
+      "message": "Your Skill Swap proposal was declined. Try another provider!"
+    },
+    "bookingRequest": {
+      "title": "New Booking Request 📅",
+      "titleSwap": "New Skill Swap Request 🔄",
+      "message": "Someone wants to book \"{{service}}\"."
+    },
+    "bookingUpdateConfirmed": {
+      "title": "Booking Confirmed!",
+      "message": "Your provider has accepted the booking."
+    },
+    "bookingUpdateDeclined": {
+      "title": "Booking Declined",
+      "message": "The provider declined. Your funds have been refunded."
+    },
+    "bookingCompleted": {
+      "titleClient": "Service Completed",
+      "titleProvider": "Job Completed",
+      "messageClient": "Booking closed successfully.",
+      "messageProvider": "Funds/Swap recorded successfully."
+    },
+    "bookingDispute": {
+      "title": "Booking Dispute Opened",
+      "message": "A dispute has been opened for your booking. Admin review in progress."
+    },
+    "bookingOverdue": {
+      "titleProvider": "Booking Overdue ⚠️",
+      "titleClient": "Booking Overdue ⚠️",
+      "messageProvider": "⚠️ Deadline Missed! Is the work for \"{{service}}\" done? Confirm now to release your funds.",
+      "messageClient": "⚠️ Job Overdue? Your service for \"{{service}}\" was scheduled for yesterday. Did it happen? Confirm receipt or Report an Issue."
     }
   },
   "errors": {

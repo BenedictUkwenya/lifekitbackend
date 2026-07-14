@@ -3,6 +3,8 @@ const router = express.Router();
 const { supabase, supabaseAdmin } = require('../config/supabase');
 const authenticateToken = require('../middleware/authMiddleware');
 const chatRoutes = require('./chatRoutes');
+const { t, getUserLang } = require('../utils/translate');
+const { notifyUser, notifyUsers } = require('../services/notificationService');
 
 const isBookingOverdue = (booking, now = new Date()) => {
   const normalizedStatus = String(booking?.status || '').toLowerCase();
@@ -41,43 +43,47 @@ const sendOverdueNudgesIfNeeded = async (bookings = []) => {
     )
   );
 
-  const notificationsToInsert = [];
-
+  const userIds = new Set();
   overdueBookings.forEach((booking) => {
+    userIds.add(booking.provider_id);
+    userIds.add(booking.client_id);
+  });
+
+  const { data: profiles } = await supabaseAdmin
+    .from('profiles')
+    .select('id, language')
+    .in('id', [...userIds]);
+
+  const langMap = {};
+  (profiles || []).forEach((p) => {
+    langMap[p.id] = getUserLang(p);
+  });
+
+  for (const booking of overdueBookings) {
     const serviceTitle = booking?.services?.title || 'Service';
     const providerKey = `${booking.id}:${booking.provider_id}`;
     const clientKey = `${booking.id}:${booking.client_id}`;
 
     if (!sentNotificationKeys.has(providerKey)) {
-      notificationsToInsert.push({
-        user_id: booking.provider_id,
-        title: 'Booking Overdue ⚠️',
-        message: `⚠️ Deadline Missed! Is the work for "${serviceTitle}" done? Confirm now to release your funds.`,
+      const lang = langMap[booking.provider_id] || 'en';
+      await notifyUser({
+        userId: booking.provider_id,
+        title: t('notifications.bookingOverdue.titleProvider', lang),
+        message: t('notifications.bookingOverdue.messageProvider', lang, { service: serviceTitle }),
         type: 'booking_overdue_nudge',
-        reference_id: booking.id,
-        is_read: false
+        referenceId: booking.id,
       });
     }
 
     if (!sentNotificationKeys.has(clientKey)) {
-      notificationsToInsert.push({
-        user_id: booking.client_id,
-        title: 'Booking Overdue ⚠️',
-        message: `⚠️ Job Overdue? Your service for "${serviceTitle}" was scheduled for yesterday. Did it happen? Confirm receipt or Report an Issue.`,
+      const lang = langMap[booking.client_id] || 'en';
+      await notifyUser({
+        userId: booking.client_id,
+        title: t('notifications.bookingOverdue.titleClient', lang),
+        message: t('notifications.bookingOverdue.messageClient', lang, { service: serviceTitle }),
         type: 'booking_overdue_nudge',
-        reference_id: booking.id,
-        is_read: false
+        referenceId: booking.id,
       });
-    }
-  });
-
-  if (notificationsToInsert.length > 0) {
-    const { error: insertNotificationError } = await supabaseAdmin
-      .from('notifications')
-      .insert(notificationsToInsert);
-
-    if (insertNotificationError) {
-      throw insertNotificationError;
     }
   }
 };
@@ -162,13 +168,22 @@ router.post('/', authenticateToken, async (req, res) => {
       throw new Error('Failed to create booking record.');
     }
 
-    await supabaseAdmin.from('notifications').insert({
-      user_id: service.provider_id,
-      title: parseFloat(total_price) === 0 ? 'New Skill Swap Request 🔄' : 'New Booking Request 📅',
-      message: `Someone wants to book "${service.title}".`,
-      type: 'booking_request', 
-      reference_id: booking.id,
-      is_read: false
+    const { data: providerProfile } = await supabaseAdmin
+      .from('profiles')
+      .select('language')
+      .eq('id', service.provider_id)
+      .maybeSingle();
+    const providerLang = getUserLang(providerProfile);
+    const isSwap = parseFloat(total_price) === 0;
+
+    await notifyUser({
+      userId: service.provider_id,
+      title: isSwap
+        ? t('notifications.bookingRequest.titleSwap', providerLang)
+        : t('notifications.bookingRequest.title', providerLang),
+      message: t('notifications.bookingRequest.message', providerLang, { service: service.title }),
+      type: 'booking_request',
+      referenceId: booking.id,
     });
 
     res.status(201).json({ message: 'Booking request sent.', booking });
@@ -262,13 +277,19 @@ router.post('/:id/dispute', authenticateToken, async (req, res) => {
     const otherUserId =
       booking.client_id === userId ? booking.provider_id : booking.client_id;
 
-    await supabaseAdmin.from('notifications').insert({
-      user_id: otherUserId,
-      title: 'Booking Dispute Opened',
-      message: 'A dispute has been opened for your booking. Admin review in progress.',
+    const { data: otherProfile } = await supabaseAdmin
+      .from('profiles')
+      .select('language')
+      .eq('id', otherUserId)
+      .maybeSingle();
+    const otherLang = getUserLang(otherProfile);
+
+    await notifyUser({
+      userId: otherUserId,
+      title: t('notifications.bookingDispute.title', otherLang),
+      message: t('notifications.bookingDispute.message', otherLang),
       type: 'booking_dispute',
-      reference_id: id,
-      is_read: false
+      referenceId: id,
     });
 
     res.status(201).json({ message: 'Dispute opened.', dispute });
@@ -312,6 +333,13 @@ router.put('/:id/status', authenticateToken, async (req, res) => {
 
     await chatRoutes.insertSystemStatusMessage(id, status);
 
+    const { data: clientProfile } = await supabaseAdmin
+      .from('profiles')
+      .select('language')
+      .eq('id', booking.client_id)
+      .maybeSingle();
+    const clientLang = getUserLang(clientProfile);
+
     if (status === 'cancelled') {
         const { data: clientWallet } = await supabaseAdmin.from('wallets').select('*').eq('user_id', booking.client_id).single();
         const refundBalance = parseFloat(clientWallet.balance) + parseFloat(booking.total_price);
@@ -325,20 +353,20 @@ router.put('/:id/status', authenticateToken, async (req, res) => {
             description: `Refund for Booking #${booking.id}`
         });
 
-        await supabaseAdmin.from('notifications').insert({
-            user_id: booking.client_id,
-            title: 'Booking Declined',
-            message: 'The provider declined. Your funds have been refunded.',
+        await notifyUser({
+            userId: booking.client_id,
+            title: t('notifications.bookingUpdateDeclined.title', clientLang),
+            message: t('notifications.bookingUpdateDeclined.message', clientLang),
             type: 'booking_update',
-            reference_id: id
+            referenceId: id,
         });
     } else {
-        await supabaseAdmin.from('notifications').insert({
-            user_id: booking.client_id,
-            title: 'Booking Confirmed!',
-            message: 'Your provider has accepted the booking.',
+        await notifyUser({
+            userId: booking.client_id,
+            title: t('notifications.bookingUpdateConfirmed.title', clientLang),
+            message: t('notifications.bookingUpdateConfirmed.message', clientLang),
             type: 'booking_update',
-            reference_id: id
+            referenceId: id,
         });
     }
 
@@ -409,9 +437,31 @@ router.put('/:id/complete', authenticateToken, async (req, res) => {
             });
         }
 
-        await supabaseAdmin.from('notifications').insert([
-            { user_id: booking.client_id, title: 'Service Completed', message: 'Booking closed successfully.', type: 'booking_completed', reference_id: id },
-            { user_id: booking.provider_id, title: 'Job Completed', message: 'Funds/Swap recorded successfully.', type: 'booking_completed', reference_id: id }
+        const { data: partyProfiles } = await supabaseAdmin
+          .from('profiles')
+          .select('id, language')
+          .in('id', [booking.client_id, booking.provider_id]);
+
+        const langMap = {};
+        (partyProfiles || []).forEach((p) => {
+          langMap[p.id] = getUserLang(p);
+        });
+
+        await notifyUsers([
+            {
+              userId: booking.client_id,
+              title: t('notifications.bookingCompleted.titleClient', langMap[booking.client_id] || 'en'),
+              message: t('notifications.bookingCompleted.messageClient', langMap[booking.client_id] || 'en'),
+              type: 'booking_completed',
+              referenceId: id,
+            },
+            {
+              userId: booking.provider_id,
+              title: t('notifications.bookingCompleted.titleProvider', langMap[booking.provider_id] || 'en'),
+              message: t('notifications.bookingCompleted.messageProvider', langMap[booking.provider_id] || 'en'),
+              type: 'booking_completed',
+              referenceId: id,
+            },
         ]);
 
         return res.json({ message: 'Booking fully completed. Funds released.', status: 'completed' });
