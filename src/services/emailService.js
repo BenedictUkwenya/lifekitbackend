@@ -21,7 +21,7 @@ function getResendClient() {
 }
 
 function getFromAddress() {
-  return process.env.RESEND_FROM_EMAIL || 'LifeKit <noreply@lifekithub.com>';
+  return process.env.RESEND_FROM_EMAIL || 'LifeKit <hello@lifekithub.com>';
 }
 
 function escapeHtml(str) {

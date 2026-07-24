@@ -6,14 +6,14 @@ Complete these steps before production email sending works.
 
 1. Add your domain (e.g. `lifekithub.com`) and complete DNS verification.
 2. Create an API key with **Send** permission.
-3. Note your verified sender address (e.g. `noreply@lifekithub.com`).
+3. Note your verified sender address (e.g. `hello@lifekithub.com` — avoid `noreply@`, it hurts inbox placement).
 
 ## 2. Vercel environment variables (`lifekitbackend`)
 
 | Variable | Required | Example |
 |----------|----------|---------|
 | `RESEND_API_KEY` | Yes | `re_...` |
-| `RESEND_FROM_EMAIL` | Yes | `LifeKit <noreply@lifekithub.com>` |
+| `RESEND_FROM_EMAIL` | Yes | `LifeKit <hello@lifekithub.com>` |
 | `RESEND_REPLY_TO` | No | `support@lifekithub.com` |
 | `APP_WEB_URL` | Yes | `https://www.lifekithub.com` |
 | `PROVIDER_WEB_RESET_URL` | No | `https://www.lifekithub.com/reset-password` |
