@@ -191,16 +191,22 @@ router.post('/login', async (req, res) => {
     });
 
     if (error) {
-      // Supabase usually returns "Email not confirmed" here if settings are correct
-      return res.status(401).json({ error: error.message });
+      // Supabase usually returns "Email not confirmed" when password is correct but email is unverified
+      const isUnverified = /not confirmed|not verified/i.test(error.message || '');
+      return res.status(401).json({
+        error: isUnverified ? 'Email not confirmed' : error.message,
+        isUnverified,
+        code: isUnverified ? 'EMAIL_NOT_CONFIRMED' : undefined,
+      });
     }
 
     // 2. EXTRA SECURITY CHECK: Ensure email is verified
     // Sometimes Supabase allows login but marks user as unverified. Let's block that.
     if (!data.user.email_confirmed_at) {
-      return res.status(403).json({ 
-        error: 'Email not verified. Please verify your email before logging in.',
-        isUnverified: true // Flag for frontend
+      return res.status(403).json({
+        error: 'Email not confirmed',
+        isUnverified: true,
+        code: 'EMAIL_NOT_CONFIRMED',
       });
     }
 
@@ -383,6 +389,73 @@ router.post('/reset-password', async (req, res) => {
   } catch (error) {
     console.error('Unexpected password reset error:', error.message);
     res.status(500).json({ error: 'Internal server error during password reset.' });
+  }
+});
+
+/**
+ * POST /auth/resend-otp
+ * Regenerates and emails a signup verification OTP for an unverified account.
+ * Requires email + password (same credentials as login) so only the account owner can request a code.
+ */
+router.post('/resend-otp', async (req, res) => {
+  let { email, password, language } = req.body;
+  const lang = normalizeLang(language);
+
+  if (email) email = email.trim().toLowerCase();
+
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password are required.' });
+  }
+
+  try {
+    const existingUser = await findAuthUserByEmail(email);
+
+    if (!existingUser) {
+      return res.status(200).json({
+        message: 'If an unverified account exists for this email, a new code has been sent.',
+      });
+    }
+
+    if (existingUser.email_confirmed_at) {
+      return res.status(400).json({
+        error: 'Email is already verified. Please sign in.',
+        alreadyVerified: true,
+      });
+    }
+
+    const fullName = existingUser.user_metadata?.full_name || 'there';
+
+    const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
+      type: 'signup',
+      email,
+      password,
+      options: {
+        data: { full_name: fullName },
+      },
+    });
+
+    if (linkError) {
+      console.error('Supabase generateLink resend-otp error:', linkError.message);
+      return res.status(400).json({ error: linkError.message });
+    }
+
+    const otp = linkData?.properties?.email_otp;
+    if (!otp) {
+      console.error('Supabase generateLink resend-otp: missing email_otp');
+      return res.status(500).json({ error: 'Failed to generate verification code.' });
+    }
+
+    emailService.sendSignupOtpEmail({ email, fullName, otp, lang }).catch((err) => {
+      console.error('Resend OTP email failed:', err.message);
+    });
+
+    return res.status(200).json({
+      message: 'A new verification code has been sent.',
+      email,
+    });
+  } catch (error) {
+    console.error('Unexpected resend-otp error:', error.message);
+    return res.status(500).json({ error: 'Internal server error while resending verification code.' });
   }
 });
 
