@@ -22,6 +22,40 @@ async function findAuthUserByEmail(email) {
   }
 }
 
+/** Prevents duplicate OTP emails (double-clicks / parallel requests). Best-effort in serverless. */
+const OTP_COOLDOWN_MS = 60 * 1000;
+const otpSendState = new Map();
+
+function beginOtpSendGuard(email) {
+  const now = Date.now();
+  const entry = otpSendState.get(email);
+
+  if (entry?.inFlight) {
+    return { ok: false, status: 429, error: 'A verification code is already being sent. Please wait a moment.', retryAfterSec: 5 };
+  }
+
+  if (entry?.lastSentAt && now - entry.lastSentAt < OTP_COOLDOWN_MS) {
+    const retryAfterSec = Math.max(1, Math.ceil((OTP_COOLDOWN_MS - (now - entry.lastSentAt)) / 1000));
+    return {
+      ok: false,
+      status: 429,
+      error: `Please wait ${retryAfterSec}s before requesting another code.`,
+      retryAfterSec,
+    };
+  }
+
+  otpSendState.set(email, { lastSentAt: entry?.lastSentAt || 0, inFlight: true });
+  return { ok: true };
+}
+
+function finishOtpSendGuard(email, { sent } = { sent: false }) {
+  const entry = otpSendState.get(email) || {};
+  otpSendState.set(email, {
+    lastSentAt: sent ? Date.now() : (entry.lastSentAt || 0),
+    inFlight: false,
+  });
+}
+
 /**
  * 1. POST /auth/signup
  * Handles user registration with Email and Password.
@@ -84,75 +118,100 @@ router.post('/signup', async (req, res) => {
       return res.status(409).json({ error: 'Email is already registered. Please login.' });
     }
 
-    const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
-      type: 'signup',
-      email,
-      password,
-      options: {
-        data: { full_name },
-      },
-    });
-
-    if (linkError) {
-      console.error('Supabase generateLink signup error:', linkError.message);
-      return res.status(400).json({ error: linkError.message });
+    const otpGuard = beginOtpSendGuard(email);
+    if (!otpGuard.ok) {
+      return res.status(otpGuard.status).json({
+        error: otpGuard.error,
+        retryAfterSec: otpGuard.retryAfterSec,
+      });
     }
 
-    const otp = linkData?.properties?.email_otp;
-    if (!otp) {
-      console.error('Supabase generateLink signup: missing email_otp');
-      return res.status(500).json({ error: 'Failed to generate verification code.' });
+    try {
+      const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
+        type: 'signup',
+        email,
+        password,
+        options: {
+          data: { full_name },
+        },
+      });
+
+      if (linkError) {
+        console.error('Supabase generateLink signup error:', linkError.message);
+        finishOtpSendGuard(email, { sent: false });
+        return res.status(400).json({ error: linkError.message });
+      }
+
+      const otp = linkData?.properties?.email_otp;
+      if (!otp) {
+        console.error('Supabase generateLink signup: missing email_otp');
+        finishOtpSendGuard(email, { sent: false });
+        return res.status(500).json({ error: 'Failed to generate verification code.' });
+      }
+
+      if (linkData.user) {
+          const isEarlyAdopterProvider = is_provider_signup === true && is_web_signup === true;
+
+          const trialEndDate = !isEarlyAdopterProvider
+              ? new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString()
+              : null;
+
+          const profilePayload = {
+              id: linkData.user.id,
+              email: email,
+              full_name: full_name,
+              language: lang,
+              is_service_provider: isEarlyAdopterProvider ? true : false,
+              subscription_tier: isEarlyAdopterProvider ? 'pro' : 'free',
+              is_founding_member: true,
+              ...(isEarlyAdopterProvider && {
+                  subscription_expiry: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
+              }),
+              ...(trialEndDate && {
+                  trial_end_date: trialEndDate,
+              }),
+          };
+
+          const { error: profileError } = await supabaseAdmin
+              .from('profiles')
+              .upsert(profilePayload, { onConflict: 'id' });
+              
+          if (profileError) {
+              console.warn("Manual profile upsert warning:", profileError.message);
+              // Fallback: try explicit update in case trigger already created the row
+              const { error: updateError } = await supabaseAdmin
+                  .from('profiles')
+                  .update(profilePayload)
+                  .eq('id', linkData.user.id);
+              if (updateError) {
+                  console.warn("Profile update fallback warning:", updateError.message);
+              }
+          }
+      }
+
+      const sendResult = await emailService.sendSignupOtpEmail({
+        email,
+        fullName: full_name,
+        otp,
+        lang,
+      });
+      if (sendResult?.error) {
+        console.error('Signup OTP email failed:', sendResult.error);
+        finishOtpSendGuard(email, { sent: false });
+        return res.status(502).json({ error: 'Failed to send verification email. Please try again.' });
+      }
+
+      finishOtpSendGuard(email, { sent: true });
+
+      res.status(200).json({
+        message: 'Registration successful! Please check your email for confirmation.',
+        user_id: linkData.user?.id,
+        email: email,
+      });
+    } catch (innerErr) {
+      finishOtpSendGuard(email, { sent: false });
+      throw innerErr;
     }
-
-    if (linkData.user) {
-        const isEarlyAdopterProvider = is_provider_signup === true && is_web_signup === true;
-
-        const trialEndDate = !isEarlyAdopterProvider
-            ? new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString()
-            : null;
-
-        const profilePayload = {
-            id: linkData.user.id,
-            email: email,
-            full_name: full_name,
-            language: lang,
-            is_service_provider: isEarlyAdopterProvider ? true : false,
-            subscription_tier: isEarlyAdopterProvider ? 'pro' : 'free',
-            is_founding_member: true,
-            ...(isEarlyAdopterProvider && {
-                subscription_expiry: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
-            }),
-            ...(trialEndDate && {
-                trial_end_date: trialEndDate,
-            }),
-        };
-
-        const { error: profileError } = await supabaseAdmin
-            .from('profiles')
-            .upsert(profilePayload, { onConflict: 'id' });
-            
-        if (profileError) {
-            console.warn("Manual profile upsert warning:", profileError.message);
-            // Fallback: try explicit update in case trigger already created the row
-            const { error: updateError } = await supabaseAdmin
-                .from('profiles')
-                .update(profilePayload)
-                .eq('id', linkData.user.id);
-            if (updateError) {
-                console.warn("Profile update fallback warning:", updateError.message);
-            }
-        }
-    }
-
-    emailService.sendSignupOtpEmail({ email, fullName: full_name, otp, lang }).catch((err) => {
-      console.error('Signup OTP email failed:', err.message);
-    });
-
-    res.status(200).json({
-      message: 'Registration successful! Please check your email for confirmation.',
-      user_id: linkData.user?.id,
-      email: email,
-    });
 
   } catch (error) {
     console.error('Unexpected signup error:', error.message);
@@ -407,16 +466,26 @@ router.post('/resend-otp', async (req, res) => {
     return res.status(400).json({ error: 'Email and password are required.' });
   }
 
+  const otpGuard = beginOtpSendGuard(email);
+  if (!otpGuard.ok) {
+    return res.status(otpGuard.status).json({
+      error: otpGuard.error,
+      retryAfterSec: otpGuard.retryAfterSec,
+    });
+  }
+
   try {
     const existingUser = await findAuthUserByEmail(email);
 
     if (!existingUser) {
+      finishOtpSendGuard(email, { sent: false });
       return res.status(200).json({
         message: 'If an unverified account exists for this email, a new code has been sent.',
       });
     }
 
     if (existingUser.email_confirmed_at) {
+      finishOtpSendGuard(email, { sent: false });
       return res.status(400).json({
         error: 'Email is already verified. Please sign in.',
         alreadyVerified: true,
@@ -436,24 +505,33 @@ router.post('/resend-otp', async (req, res) => {
 
     if (linkError) {
       console.error('Supabase generateLink resend-otp error:', linkError.message);
+      finishOtpSendGuard(email, { sent: false });
       return res.status(400).json({ error: linkError.message });
     }
 
     const otp = linkData?.properties?.email_otp;
     if (!otp) {
       console.error('Supabase generateLink resend-otp: missing email_otp');
+      finishOtpSendGuard(email, { sent: false });
       return res.status(500).json({ error: 'Failed to generate verification code.' });
     }
 
-    emailService.sendSignupOtpEmail({ email, fullName, otp, lang }).catch((err) => {
-      console.error('Resend OTP email failed:', err.message);
-    });
+    const sendResult = await emailService.sendSignupOtpEmail({ email, fullName, otp, lang });
+    if (sendResult?.error) {
+      console.error('Resend OTP email failed:', sendResult.error);
+      finishOtpSendGuard(email, { sent: false });
+      return res.status(502).json({ error: 'Failed to send verification email. Please try again.' });
+    }
+
+    finishOtpSendGuard(email, { sent: true });
 
     return res.status(200).json({
       message: 'A new verification code has been sent.',
       email,
+      cooldownSec: Math.ceil(OTP_COOLDOWN_MS / 1000),
     });
   } catch (error) {
+    finishOtpSendGuard(email, { sent: false });
     console.error('Unexpected resend-otp error:', error.message);
     return res.status(500).json({ error: 'Internal server error while resending verification code.' });
   }
