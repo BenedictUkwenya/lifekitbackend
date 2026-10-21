@@ -96,10 +96,15 @@ router.post('/deposit', authenticateToken, async (req, res) => {
   const email = req.user.email;
 
   try {
+    const numericAmount = Number(amount);
+    if (!Number.isFinite(numericAmount) || numericAmount < 1 || numericAmount > 10000) {
+      return res.status(400).json({ error: 'Deposit must be between $1 and $10,000.' });
+    }
+
     const wallet = await getOrCreateWallet(userId, email);
 
     const paymentIntent = await stripe.paymentIntents.create({
-      amount: Math.round(amount * 100),
+      amount: Math.round(numericAmount * 100),
       currency: 'usd',
       customer: wallet.stripe_customer_id,
       automatic_payment_methods: { enabled: true },
@@ -130,15 +135,22 @@ router.post('/confirm-deposit', authenticateToken, async (req, res) => {
   try {
     const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
 
+    if (paymentIntent.metadata?.userId !== req.user.id || paymentIntent.metadata?.type !== 'wallet_deposit') {
+      return res.status(403).json({ error: 'This payment does not belong to you.' });
+    }
+
     if (paymentIntent.status === 'succeeded') {
       const amountUSD = paymentIntent.amount / 100;
       const walletId = paymentIntent.metadata.walletId;
 
-      const { data: existingTx } = await supabase
+      // Must use the service-role client: RLS hides transactions from the
+      // anon client, which made this idempotency check always miss and let a
+      // repeated confirm credit the same payment twice.
+      const { data: existingTx } = await supabaseAdmin
         .from('transactions')
-        .select('*')
+        .select('id')
         .eq('stripe_payment_id', paymentIntentId)
-        .single();
+        .maybeSingle();
 
       if (existingTx) {
         return res.status(200).json({ message: 'Transaction already processed' });
@@ -163,7 +175,7 @@ router.post('/confirm-deposit', authenticateToken, async (req, res) => {
 
       await supabaseAdmin
         .from('wallets')
-        .update({ balance: wallet.balance + amountUSD })
+        .update({ balance: parseFloat(wallet.balance) + amountUSD })
         .eq('id', walletId);
 
       res.status(200).json({ message: 'Wallet funded successfully!' });
@@ -267,7 +279,7 @@ router.post('/withdraw', authenticateToken, async (req, res) => {
 
     const wallet = await getOrCreateWallet(userId, email);
 
-    if (wallet.balance < amount) {
+    if (parseFloat(wallet.balance) < Number(amount)) {
       return res.status(400).json({ error: 'Insufficient funds' });
     }
 
@@ -321,7 +333,12 @@ router.post('/withdraw', authenticateToken, async (req, res) => {
 });
 router.post('/test/simulate-payment', authenticateToken, async (req, res) => {
   const { paymentIntentId } = req.body;
-  
+
+  // Dev-only helper: never expose in production.
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ error: 'Not found' });
+  }
+
   try {
     // 1. Tell Stripe to "Pay" this intent using a Test Visa Card
     const paymentIntent = await stripe.paymentIntents.confirm(paymentIntentId, {

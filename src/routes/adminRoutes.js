@@ -175,7 +175,23 @@ router.post('/withdraw', async (req, res) => {
     const { amount, destination } = req.body; 
 
     try {
-        if (!amount || amount <= 0) return res.status(400).json({ error: "Invalid amount" });
+        const numericAmount = Number(amount);
+        if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
+            return res.status(400).json({ error: "Invalid amount" });
+        }
+
+        // Never allow withdrawing more than the commission actually earned
+        const [paymentsRes, withdrawalsRes] = await Promise.all([
+            supabaseAdmin.from('transactions').select('amount').eq('type', 'payment').eq('status', 'success'),
+            supabaseAdmin.from('transactions').select('amount').eq('type', 'admin_withdrawal'),
+        ]);
+        if (paymentsRes.error) throw paymentsRes.error;
+        if (withdrawalsRes.error) throw withdrawalsRes.error;
+        const earned = paymentsRes.data.reduce((sum, t) => sum + Number(t.amount), 0) * COMMISSION_RATE;
+        const withdrawn = withdrawalsRes.data.reduce((sum, t) => sum + Math.abs(Number(t.amount)), 0);
+        if (numericAmount > earned - withdrawn + 0.0001) {
+            return res.status(400).json({ error: "Amount exceeds available balance" });
+        }
 
         // Insert Withdrawal Record
         const { data, error } = await supabaseAdmin
@@ -183,7 +199,7 @@ router.post('/withdraw', async (req, res) => {
             .insert({
                 wallet_id: null, // Null because it's the System/Admin wallet
                 type: 'admin_withdrawal',
-                amount: -amount, // Negative because money is leaving
+                amount: -numericAmount, // Negative because money is leaving
                 status: 'success',
                 description: `Admin Payout to ${destination || 'Bank'}`
             })
@@ -209,7 +225,7 @@ router.post('/withdraw', async (req, res) => {
 router.get('/stats', async (req, res) => {
   try {
     const [revenue, bookings, pendingServices, users] = await Promise.all([
-      supabaseAdmin.from('transactions').select('amount').eq('type', 'payment'), 
+      supabaseAdmin.from('transactions').select('amount').eq('type', 'payment').eq('status', 'success'),
       supabaseAdmin.from('bookings').select('*', { count: 'exact', head: true }),
       supabaseAdmin.from('services').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
       supabaseAdmin.from('profiles').select('*', { count: 'exact', head: true })
@@ -222,6 +238,39 @@ router.get('/stats', async (req, res) => {
       total_bookings: bookings.count || 0,
       pending_reviews: pendingServices.count || 0,
       total_users: users.count || 0
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /admin/overview — compact counts for the mobile admin home (one round-trip)
+router.get('/overview', async (req, res) => {
+  try {
+    const head = { count: 'exact', head: true };
+    const [revenue, bookings, users, pendingServices, disputes, tickets, reports, requests, confirmed] = await Promise.all([
+      supabaseAdmin.from('transactions').select('amount').eq('type', 'payment').eq('status', 'success'),
+      supabaseAdmin.from('bookings').select('*', head),
+      supabaseAdmin.from('profiles').select('*', head),
+      supabaseAdmin.from('services').select('*', head).eq('status', 'pending'),
+      supabaseAdmin.from('bookings').select('*', head).eq('status', 'disputed'),
+      supabaseAdmin.from('support_tickets').select('*', head).eq('status', 'open'),
+      supabaseAdmin.from('user_reports').select('*', head).eq('status', 'pending'),
+      supabaseAdmin.from('requested_categories').select('*', head).eq('status', 'pending'),
+      supabaseAdmin.from('bookings').select('status, scheduled_time').eq('status', 'confirmed'),
+    ]);
+
+    const now = new Date();
+    res.json({
+      total_revenue: (revenue.data || []).reduce((acc, t) => acc + Math.abs(Number(t.amount)), 0),
+      total_bookings: bookings.count || 0,
+      total_users: users.count || 0,
+      pending_reviews: pendingServices.count || 0,
+      open_disputes: disputes.count || 0,
+      open_tickets: tickets.count || 0,
+      pending_reports: reports.count || 0,
+      pending_category_requests: requests.count || 0,
+      overdue_jobs: (confirmed.data || []).filter((b) => isOverdueBooking(b, now)).length,
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -318,7 +367,7 @@ router.get('/bookings/all', async (req, res) => {
         services(title, service_categories(name), profiles:provider_id(full_name))
       `)
       .order('created_at', { ascending: false })
-      .limit(10);
+      .limit(Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200));
 
     if (error) throw error;
     const now = new Date();
@@ -459,13 +508,18 @@ router.get('/users/admins', async (req, res) => {
 router.post('/users/invite-admin', async (req, res) => {
   const { email, password, full_name } = req.body;
   try {
+    if (!email || !password || password.length < 6) {
+      return res.status(400).json({ error: 'Email and a password of at least 6 characters are required' });
+    }
     const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
       email, password, email_confirm: true
     });
     if (authError) throw authError;
 
+    // Upsert: the auth trigger may not have created the profile row yet
     const { error: profileError } = await supabaseAdmin
-      .from('profiles').update({ role: 'admin', full_name }).eq('id', authData.user.id);
+      .from('profiles')
+      .upsert({ id: authData.user.id, email, role: 'admin', full_name }, { onConflict: 'id' });
     if (profileError) throw profileError;
 
     res.json({ message: 'Admin created successfully' });
@@ -477,6 +531,9 @@ router.post('/users/invite-admin', async (req, res) => {
 // DELETE /admin/users/admins/:id
 router.delete('/users/admins/:id', async (req, res) => {
   try {
+    if (req.params.id === req.user.id) {
+      return res.status(400).json({ error: 'You cannot remove your own admin account.' });
+    }
     const { error } = await supabaseAdmin.auth.admin.deleteUser(req.params.id);
     if (error) throw error;
     res.json({ message: 'Admin removed' });
@@ -508,6 +565,9 @@ router.put('/users/:id/status', async (req, res) => {
   try {
     if (!allowedStatuses.includes(status)) {
       return res.status(400).json({ error: 'Invalid status' });
+    }
+    if (id === req.user.id) {
+      return res.status(400).json({ error: 'You cannot change your own account status.' });
     }
 
     const { data, error } = await supabaseAdmin
@@ -699,7 +759,8 @@ router.post('/disputes/:bookingId/resolve', async (req, res) => {
 
       if (booking.total_price > 0) {
         const { data: clientWallet } = await supabaseAdmin
-          .from('wallets').select('*').eq('user_id', booking.client_id).single();
+          .from('wallets').select('*').eq('user_id', booking.client_id).maybeSingle();
+        if (!clientWallet) return res.status(409).json({ error: 'Client wallet not found.' });
         const refundBalance = parseFloat(clientWallet.balance) + parseFloat(booking.total_price);
         await supabaseAdmin.from('wallets').update({ balance: refundBalance }).eq('id', clientWallet.id);
         await supabaseAdmin.from('transactions').insert({
@@ -713,7 +774,8 @@ router.post('/disputes/:bookingId/resolve', async (req, res) => {
 
       if (booking.total_price > 0) {
         const { data: providerWallet } = await supabaseAdmin
-          .from('wallets').select('*').eq('user_id', booking.provider_id).single();
+          .from('wallets').select('*').eq('user_id', booking.provider_id).maybeSingle();
+        if (!providerWallet) return res.status(409).json({ error: 'Provider wallet not found.' });
         const newBalance = parseFloat(providerWallet.balance) + parseFloat(booking.total_price);
         await supabaseAdmin.from('wallets').update({ balance: newBalance }).eq('id', providerWallet.id);
         await supabaseAdmin.from('transactions').insert({

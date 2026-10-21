@@ -23,6 +23,7 @@ const reviewRoutes = require('./src/routes/reviewRoutes');
 const aiRoutes = require('./src/routes/aiRoutes');
 const swapRoutes = require('./src/routes/swapRoutes');
 const cronRoutes = require('./src/routes/cronRoutes');
+const pushRoutes = require('./src/routes/pushRoutes');
 // ...
 
 
@@ -78,6 +79,7 @@ app.use('/upgrades', upgradeRoutes);
 app.use('/ai', aiRoutes);
 app.use('/swap-requests', swapRoutes);
 app.use('/cron', cronRoutes);
+app.use('/push', pushRoutes);
 
 
 // --- SERVER STARTUP (Modified for Vercel) ---

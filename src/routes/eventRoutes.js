@@ -187,14 +187,25 @@ router.delete('/:id', authenticateAdmin, async (req, res) => {
 // BUY TICKET (unchanged logic, kept here)
 // =============================================================================
 router.post('/buy-ticket', authenticateToken, async (req, res) => {
-  const { event_id, quantity, total_price } = req.body;
+  const { event_id } = req.body;
+  const quantity = Number(req.body.quantity);
   const userId = req.user.id;
 
-  if (!event_id || !quantity || !total_price) {
+  if (!event_id || !Number.isInteger(quantity) || quantity < 1 || quantity > 20) {
     return res.status(400).json({ error: 'Missing ticket details' });
   }
 
   try {
+    // Price is computed server-side — a client-supplied total (e.g. negative)
+    // would otherwise let buyers pay nothing or even credit their wallet.
+    const { data: event } = await supabaseAdmin
+      .from('events').select('id, price, is_active').eq('id', event_id).maybeSingle();
+    if (!event || event.is_active === false) {
+      return res.status(404).json({ error: 'This event is no longer available.' });
+    }
+    const TICKET_SERVICE_FEE = 2.0; // mirrors EventBookingScreen._serviceFee
+    const total_price = Math.round(((Number(event.price) || 0) * quantity + TICKET_SERVICE_FEE) * 100) / 100;
+
     const { data: wallet } = await supabaseAdmin
       .from('wallets').select('*').eq('user_id', userId).single();
 

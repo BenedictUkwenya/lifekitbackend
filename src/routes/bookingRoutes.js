@@ -94,8 +94,43 @@ const sendOverdueNudgesIfNeeded = async (bookings = []) => {
  * 1. POST /bookings - Client creates a new booking request
  * Logic: Check Balance -> Deduct Money (Hold) -> Create Booking -> Notify Provider
  */
+/**
+ * True when `total` is a price the client could legitimately compute for
+ * this service: fixed price, hourly price × 1–24h, or the sum of any subset
+ * of the service's options — times a cart quantity of 1–20.
+ */
+function isValidServiceTotal(service, total) {
+  const base = Number(service.price) || 0;
+  const options = (Array.isArray(service.service_options) ? service.service_options : [])
+    .map((o) => Number(o?.price) || 0)
+    .slice(0, 12); // bounds the subset enumeration (4096 sums max)
+
+  const units = new Set();
+  if (options.length > 0) {
+    for (let mask = 1; mask < (1 << options.length); mask++) {
+      let sum = 0;
+      options.forEach((p, i) => { if (mask & (1 << i)) sum += p; });
+      units.add(Math.round(sum * 100));
+    }
+  } else if (service.pricing_type === 'hourly') {
+    for (let h = 1; h <= 24; h++) units.add(Math.round(base * h * 100));
+  } else {
+    units.add(Math.round(base * 100));
+  }
+
+  const cents = Math.round(total * 100);
+  for (const unit of units) {
+    if (unit === 0 ? cents === 0 : cents % unit === 0 && cents / unit >= 1 && cents / unit <= 20) {
+      return true;
+    }
+  }
+  return false;
+}
+
 router.post('/', authenticateToken, async (req, res) => {
-  const { service_id, scheduled_time, location_details, total_price, service_type, comments } = req.body;
+  const { service_id, scheduled_time, location_details, service_type, comments } = req.body;
+  // Re-assigned below to the server-validated amount (also used by the rollback)
+  let { total_price } = req.body;
   const clientId = req.user.id;
 
   if (!service_id || !scheduled_time || total_price === undefined) {
@@ -108,7 +143,7 @@ router.post('/', authenticateToken, async (req, res) => {
   try {
     const { data: service, error: serviceError } = await supabaseAdmin 
       .from('services')
-      .select('provider_id, price, title') 
+      .select('provider_id, price, title, pricing_type, service_options')
       .eq('id', service_id)
       .single();
 
@@ -116,18 +151,28 @@ router.post('/', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Service not found.' });
     }
 
+    // Never trust the client's amount — negative or free-form values would
+    // let a client credit their own wallet. It must match a price this
+    // service can actually produce (see CartProvider.calculateServiceTotal).
+    const claimed = Number(total_price);
+    if (!Number.isFinite(claimed) || claimed < 0 || !isValidServiceTotal(service, claimed)) {
+      return res.status(400).json({ error: 'Price does not match the service. Please refresh and try again.' });
+    }
+    const price = Math.round(claimed * 100) / 100;
+    total_price = price;
+
     const { data: clientWallet, error: walletFetchError } = await supabaseAdmin
       .from('wallets')
       .select('id, balance')
       .eq('user_id', clientId)
       .single();
 
-    if (walletFetchError || !clientWallet || parseFloat(clientWallet.balance) < parseFloat(total_price)) {
+    if (walletFetchError || !clientWallet || parseFloat(clientWallet.balance) < price) {
       return res.status(402).json({ error: 'Insufficient wallet balance.' });
     }
 
     walletId = clientWallet.id;
-    const newBalance = parseFloat(clientWallet.balance) - parseFloat(total_price);
+    const newBalance = parseFloat(clientWallet.balance) - price;
     
     const { error: walletUpdateError } = await supabaseAdmin
       .from('wallets')

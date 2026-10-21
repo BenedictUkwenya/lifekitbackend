@@ -19,6 +19,7 @@
     "date-fns": "^4.1.0",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
+    "firebase-admin": "^12.7.0",
     "multer": "^2.0.2",
     "resend": "^6.17.1",
     "stripe": "^20.0.0"

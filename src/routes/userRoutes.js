@@ -617,4 +617,58 @@ router.get('/provider-stats', authenticateToken, async (req, res) => {
 });
 
 
+// =============================================================================
+// BLOCK / UNBLOCK USERS (App Store Guideline 1.2)
+// =============================================================================
+router.post('/blocks/:id', authenticateToken, async (req, res) => {
+  const blockerId = req.user.id;
+  const blockedId = req.params.id;
+  if (blockedId === blockerId) return res.status(400).json({ error: 'You cannot block yourself.' });
+  try {
+    const { error } = await supabaseAdmin
+      .from('user_blocks')
+      .upsert({ blocker_id: blockerId, blocked_id: blockedId }, { onConflict: 'blocker_id,blocked_id' });
+    if (error) throw error;
+    res.json({ message: 'User blocked.' });
+  } catch (error) {
+    console.error('Block user error:', error.message);
+    res.status(500).json({ error: 'Failed to block user.' });
+  }
+});
+
+router.get('/blocks', authenticateToken, async (req, res) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('user_blocks')
+      .select('blocked_id, created_at, profile:profiles!user_blocks_blocked_id_fkey(id, full_name, username, profile_picture_url)')
+      .eq('blocker_id', req.user.id)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json((data || []).map((b) => ({
+      id: b.blocked_id,
+      blocked_at: b.created_at,
+      full_name: b.profile?.full_name || null,
+      username: b.profile?.username || null,
+      profile_picture_url: b.profile?.profile_picture_url || null,
+    })));
+  } catch (error) {
+    console.error('List blocks error:', error.message);
+    res.status(500).json({ error: 'Failed to load blocked users.' });
+  }
+});
+
+router.delete('/blocks/:id', authenticateToken, async (req, res) => {
+  try {
+    const { error } = await supabaseAdmin
+      .from('user_blocks')
+      .delete()
+      .eq('blocker_id', req.user.id)
+      .eq('blocked_id', req.params.id);
+    if (error) throw error;
+    res.json({ message: 'User unblocked.' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to unblock user.' });
+  }
+});
+
 module.exports = router;

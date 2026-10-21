@@ -59,10 +59,23 @@ router.get('/posts', authenticateToken, async (req, res) => {
 
     if (error) throw error;
 
+    // Hide posts between users where either side blocked the other.
+    // Fail open: if user_blocks isn't migrated yet the feed still loads.
+    const hidden = new Set();
+    try {
+      const { data: blocks, error: blocksError } = await supabaseAdmin
+        .from('user_blocks')
+        .select('blocker_id, blocked_id')
+        .or(`blocker_id.eq.${userId},blocked_id.eq.${userId}`);
+      if (!blocksError) {
+        (blocks || []).forEach((b) => hidden.add(b.blocker_id === userId ? b.blocked_id : b.blocker_id));
+      }
+    } catch (_) {}
+
     const now = Date.now();
     const oneDayMs = 24 * 60 * 60 * 1000;
 
-    const enriched = (data || []).map((p) => {
+    const enriched = (data || []).filter((p) => !hidden.has(p.user_id)).map((p) => {
       const createdAtMs = p.created_at ? new Date(p.created_at).getTime() : 0;
       const ageMs = Math.max(0, now - createdAtMs);
       const isRecent = ageMs <= oneDayMs;
@@ -252,40 +265,23 @@ router.post('/posts', authenticateToken, async (req, res) => {
 });
 
 // 4. DELETE /feeds/posts/:id — post owner OR admin
-router.delete('/posts/:id', async (req, res) => {
+router.delete('/posts/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
-
-  // Determine caller: try user JWT first, fall back to admin header
-  let callerId = null;
-  let isAdmin = false;
-  try {
-    const jwt = require('../middleware/authMiddleware');
-    await new Promise((resolve) => jwt(req, res, resolve));
-    callerId = req.user?.id ?? null;
-  } catch (_) {}
-
-  // Check admin header as fallback
-  const adminHeader = req.headers['x-admin-token'] || req.headers['authorization'];
-  if (!callerId) {
-    // If no user token, require admin middleware
-    const adminCheck = require('../middleware/adminMiddleware');
-    return adminCheck(req, res, async () => {
-      try {
-        const { error } = await supabaseAdmin.from('posts').delete().eq('id', id);
-        if (error) throw error;
-        res.json({ message: 'Post deleted successfully' });
-      } catch (error) {
-        res.status(500).json({ error: error.message });
-      }
-    });
-  }
+  const callerId = req.user.id;
 
   try {
-    // Verify the caller owns the post
     const { data: post, error: fetchErr } = await supabaseAdmin
       .from('posts').select('user_id').eq('id', id).maybeSingle();
     if (fetchErr || !post) return res.status(404).json({ error: 'Post not found.' });
-    if (post.user_id !== callerId) return res.status(403).json({ error: 'You can only delete your own posts.' });
+
+    if (post.user_id !== callerId) {
+      // Platform admins may moderate any post
+      const { data: caller } = await supabaseAdmin
+        .from('profiles').select('role').eq('id', callerId).maybeSingle();
+      if (caller?.role !== 'admin') {
+        return res.status(403).json({ error: 'You can only delete your own posts.' });
+      }
+    }
 
     const { error } = await supabaseAdmin.from('posts').delete().eq('id', id);
     if (error) throw error;
