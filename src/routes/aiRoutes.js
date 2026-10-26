@@ -489,10 +489,14 @@ Do not include any explanation, markdown, or extra text outside the JSON object.
     }
 
     const ROUTES = new Set(['profile', 'create_service', 'explore', 'wallet', 'none']);
+    // Progress lives on each day: the plan starts now, nothing done yet.
+    const startedAt = new Date().toISOString();
     parsed.plan = parsed.plan.slice(0, 7).map((d, i) => ({
       day: i + 1,
       task: typeof d?.task === 'string' ? d.task : '',
       action_route: ROUTES.has(d?.action_route) ? d.action_route : 'none',
+      started_at: startedAt,
+      done_at: null,
     }));
     // A community id the model made up becomes a "start a new one" suggestion
     // instead of a link to a group that doesn't exist.
@@ -542,10 +546,14 @@ Do not include any explanation, markdown, or extra text outside the JSON object.
     }
 
     // Persist canonical English plan + (optionally) seed translation cache.
-    const updatePayload = { onboarding_plan: parsed.plan };
-    if (translationCacheForLang) {
-      updatePayload.onboarding_plan_translations = { [lang]: translationCacheForLang };
-    }
+    // Always replace the translation cache — a new plan must never be shown
+    // with the previous plan's translated tasks.
+    const updatePayload = {
+      onboarding_plan: parsed.plan,
+      onboarding_plan_translations: translationCacheForLang
+        ? { [lang]: translationCacheForLang }
+        : {},
+    };
     supabaseAdmin
       .from('profiles')
       .update(updatePayload)

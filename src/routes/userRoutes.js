@@ -26,20 +26,22 @@ async function localiseOnboardingPlan(profile, lang) {
   const plan = profile.onboarding_plan;
   if (!Array.isArray(plan) || plan.length === 0) return profile;
 
+  // Translations only ever supply the task text. Everything else (day,
+  // action_route, started_at, done_at — i.e. progress) comes from the
+  // canonical plan, so progress is identical in every language.
+  const withTasks = (tasks) =>
+    plan.map((day, i) => ({ ...day, task: tasks[i] || day?.task || '' }));
+
   const cache = profile.onboarding_plan_translations || {};
   if (cache[lang] && Array.isArray(cache[lang]) && cache[lang].length === plan.length) {
-    return { ...profile, onboarding_plan: cache[lang] };
+    return { ...profile, onboarding_plan: withTasks(cache[lang].map((d) => d?.task)) };
   }
 
   try {
-    const translatedPlan = await Promise.all(
-      plan.map(async (day) => {
-        const taskText = day?.task;
-        if (!taskText) return day;
-        const translated = await translateText(taskText, lang);
-        return { ...day, task: translated };
-      })
+    const translatedTasks = await Promise.all(
+      plan.map(async (day) => (day?.task ? translateText(day.task, lang) : ''))
     );
+    const translatedPlan = withTasks(translatedTasks);
 
     const newCache = { ...cache, [lang]: translatedPlan };
     supabaseAdmin
@@ -89,6 +91,52 @@ router.get('/profile', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('Unexpected error fetching user profile:', error.message);
     res.status(500).json({ error: 'Internal server error fetching user profile.' });
+  }
+});
+
+// =============================================================================
+// 1b. DAILY PLAN PROGRESS — mark a 7-day-plan day done / not done
+// Body: { day: 1-7, done: boolean }
+// =============================================================================
+router.post('/onboarding-plan/progress', authenticateToken, async (req, res) => {
+  const day = Number(req.body?.day);
+  const done = req.body?.done !== false;
+  if (!Number.isInteger(day) || day < 1 || day > 7) {
+    return res.status(400).json({ error: 'day must be an integer from 1 to 7.' });
+  }
+
+  try {
+    const { data: profile, error } = await supabaseAdmin
+      .from('profiles')
+      .select('id, onboarding_plan, onboarding_plan_translations, created_at')
+      .eq('id', req.user.id)
+      .single();
+    if (error || !profile) return res.status(404).json({ error: 'Profile not found.' });
+
+    const plan = Array.isArray(profile.onboarding_plan) ? profile.onboarding_plan : [];
+    const idx = plan.findIndex((d, i) => Number(d?.day ?? i + 1) === day);
+    if (idx === -1) return res.status(404).json({ error: 'No plan for that day.' });
+
+    // Older plans have no start date — pin it to the account creation date.
+    const startedAt = plan[0]?.started_at || profile.created_at || new Date().toISOString();
+    const updated = plan.map((d, i) => ({
+      ...d,
+      day: Number(d?.day ?? i + 1),
+      started_at: d?.started_at || startedAt,
+      done_at: i === idx ? (done ? new Date().toISOString() : null) : d?.done_at ?? null,
+    }));
+
+    const { error: upErr } = await supabaseAdmin
+      .from('profiles')
+      .update({ onboarding_plan: updated })
+      .eq('id', req.user.id);
+    if (upErr) throw upErr;
+
+    const localised = await localiseOnboardingPlan({ ...profile, onboarding_plan: updated }, getLang(req));
+    res.json({ onboarding_plan: localised.onboarding_plan });
+  } catch (error) {
+    console.error('Plan progress error:', error.message);
+    res.status(500).json({ error: 'Failed to save progress.' });
   }
 });
 
