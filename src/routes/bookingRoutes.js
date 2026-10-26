@@ -667,3 +667,4 @@ router.get('/:id', authenticateToken, async (req, res) => {
 });
 
 module.exports = router;
+module.exports.isValidServiceTotal = isValidServiceTotal;

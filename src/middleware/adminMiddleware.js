@@ -10,7 +10,6 @@ async function authenticateAdmin(req, res, next) {
   }
 
   try {
-    console.log("Admin Auth: start");
     let user;
     try {
       const { data, error } = await supabase.auth.getUser(token);
@@ -23,7 +22,6 @@ async function authenticateAdmin(req, res, next) {
         return res.status(401).json({ error: 'Invalid or expired token' });
       }
       user = data.user;
-      console.log("Admin Auth: token verified", { userId: user.id });
     } catch (err) {
       console.error("Admin Auth: getUser failed", {
         message: err?.message,
@@ -32,8 +30,6 @@ async function authenticateAdmin(req, res, next) {
       });
       return res.status(401).json({ error: 'Invalid or expired token' });
     }
-
-    console.log("Admin Auth: fetching profile role", { userId: user.id });
     const { data: profile, error: profileError } = await supabaseAdmin
       .from('profiles')
       .select('role')

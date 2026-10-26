@@ -1059,3 +1059,4 @@ ${languageInstruction(lang)}`;
 });
 
 module.exports = router;
+module.exports.validateItems = validateItems;
