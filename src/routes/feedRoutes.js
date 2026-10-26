@@ -45,8 +45,15 @@ const getCommunityLimitContext = async (userId) => {
 };
 
 // 1. GET /feeds/posts (Auth - includes like meta for current user)
+// Optional paging: ?limit=20&offset=40. Ranking (trending first) is applied
+// to a window of the most recent posts, then the requested page is sliced
+// from that ranked list. Without ?limit the whole ranked window is returned.
+const FEED_WINDOW = 500;
+
 router.get('/posts', authenticateToken, async (req, res) => {
   const userId = req.user.id;
+  const limit = req.query.limit ? Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 20)) : null;
+  const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
   try {
     const { data, error } = await supabase
       .from('posts')
@@ -55,7 +62,8 @@ router.get('/posts', authenticateToken, async (req, res) => {
         profiles(full_name, username, profile_picture_url),
         post_likes (user_id)
       `)
-      .order('created_at', { ascending: false });
+      .order('created_at', { ascending: false })
+      .limit(FEED_WINDOW);
 
     if (error) throw error;
 
@@ -117,7 +125,7 @@ router.get('/posts', authenticateToken, async (req, res) => {
       _trending_score: undefined
     }));
 
-    res.json(formatted);
+    res.json(limit ? formatted.slice(offset, offset + limit) : formatted);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
