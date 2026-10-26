@@ -52,6 +52,57 @@ async function getOrCreateWallet(userId, email) {
   return newWallet;
 }
 /**
+ * Credit a succeeded wallet-deposit PaymentIntent exactly once.
+ * The DB function records the transaction and adds to the balance in one
+ * atomic step (unique on stripe_payment_id), so the app's confirm call and
+ * the Stripe webhook can both arrive — even simultaneously — safely.
+ * @returns {Promise<boolean>} true if credited now, false if already credited
+ */
+async function creditDeposit(paymentIntent) {
+  const walletId = paymentIntent.metadata?.walletId;
+  if (!walletId) throw new Error('PaymentIntent has no walletId metadata');
+  const { data, error } = await supabaseAdmin.rpc('credit_wallet_deposit', {
+    p_payment_id: paymentIntent.id,
+    p_wallet_id: walletId,
+    p_amount: paymentIntent.amount / 100,
+  });
+  if (error) throw error;
+  return data === true;
+}
+
+/**
+ * POST /wallet/stripe-webhook — Stripe calls this when a payment succeeds,
+ * so a deposit is credited even if the app closed before confirming.
+ * Mounted in index.js with express.raw() BEFORE express.json(): the
+ * signature check needs the exact raw body.
+ */
+async function stripeWebhook(req, res) {
+  const secret = process.env.STRIPE_WEBHOOK_SECRET;
+  if (!secret) return res.status(503).json({ error: 'Webhook not configured' });
+
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, req.headers['stripe-signature'], secret);
+  } catch (err) {
+    return res.status(400).json({ error: `Invalid signature: ${err.message}` });
+  }
+
+  try {
+    if (event.type === 'payment_intent.succeeded') {
+      const pi = event.data.object;
+      if (pi.metadata?.type === 'wallet_deposit') {
+        await creditDeposit(pi);
+      }
+    }
+    res.json({ received: true });
+  } catch (err) {
+    console.error('Stripe webhook error:', err.message);
+    // 500 makes Stripe retry later — crediting is idempotent, so that's safe.
+    res.status(500).json({ error: 'Webhook handling failed' });
+  }
+}
+
+/**
  * 1. GET /wallet - Dashboard
  */
 router.get('/', authenticateToken, async (req, res) => {
@@ -140,45 +191,10 @@ router.post('/confirm-deposit', authenticateToken, async (req, res) => {
     }
 
     if (paymentIntent.status === 'succeeded') {
-      const amountUSD = paymentIntent.amount / 100;
-      const walletId = paymentIntent.metadata.walletId;
-
-      // Must use the service-role client: RLS hides transactions from the
-      // anon client, which made this idempotency check always miss and let a
-      // repeated confirm credit the same payment twice.
-      const { data: existingTx } = await supabaseAdmin
-        .from('transactions')
-        .select('id')
-        .eq('stripe_payment_id', paymentIntentId)
-        .maybeSingle();
-
-      if (existingTx) {
-        return res.status(200).json({ message: 'Transaction already processed' });
-      }
-
-      // USE ADMIN: Only Admin should insert transactions directly
-      await supabaseAdmin.from('transactions').insert({
-        wallet_id: walletId,
-        type: 'deposit',
-        amount: amountUSD,
-        stripe_payment_id: paymentIntentId,
-        status: 'success',
-        description: 'Deposit via Card'
+      const credited = await creditDeposit(paymentIntent);
+      res.status(200).json({
+        message: credited ? 'Wallet funded successfully!' : 'Transaction already processed',
       });
-
-      // USE ADMIN: Only Admin should update balances
-      const { data: wallet } = await supabaseAdmin
-        .from('wallets')
-        .select('balance')
-        .eq('id', walletId)
-        .single();
-
-      await supabaseAdmin
-        .from('wallets')
-        .update({ balance: parseFloat(wallet.balance) + amountUSD })
-        .eq('id', walletId);
-
-      res.status(200).json({ message: 'Wallet funded successfully!' });
     } else {
       res.status(400).json({ error: 'Payment not successful yet.' });
     }
@@ -358,3 +374,5 @@ router.post('/test/simulate-payment', authenticateToken, async (req, res) => {
 });
 
 module.exports = router;
+module.exports.stripeWebhook = stripeWebhook;
+module.exports.creditDeposit = creditDeposit;

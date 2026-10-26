@@ -1,6 +1,7 @@
 // src/routes/authRoutes.js
 const express = require('express');
 const router = express.Router();
+const { emailLimiter } = require('../middleware/rateLimits');
 const { supabase, supabaseAdmin } = require('../config/supabase');
 const authenticateToken = require('../middleware/authMiddleware');
 const emailService = require('../services/emailService');
@@ -79,7 +80,7 @@ function finishOtpSendGuard(email, { sent } = { sent: false }) {
  * POST /auth/signup
  * Handles user registration with a pre-signup duplicate email check.
  */
-router.post('/signup', async (req, res) => {
+router.post('/signup', emailLimiter, async (req, res) => {
   let { email, password, confirm_password, full_name, is_provider_signup, is_web_signup, language } = req.body;
   const lang = normalizeLang(language);
 
@@ -314,7 +315,7 @@ router.post('/login', async (req, res) => {
  * Sends a password reset link to the user's email.
  * Accepts optional redirect_to, or source ('web' | 'mobile') to pick the right redirect URL.
  */
-router.post('/forgot-password', async (req, res) => {
+router.post('/forgot-password', emailLimiter, async (req, res) => {
   const { email, redirect_to, source, language } = req.body;
   const lang = normalizeLang(language);
 
@@ -456,7 +457,7 @@ router.post('/reset-password', async (req, res) => {
  * Regenerates and emails a signup verification OTP for an unverified account.
  * Requires email + password (same credentials as login) so only the account owner can request a code.
  */
-router.post('/resend-otp', async (req, res) => {
+router.post('/resend-otp', emailLimiter, async (req, res) => {
   let { email, password, language } = req.body;
   const lang = normalizeLang(language);
 

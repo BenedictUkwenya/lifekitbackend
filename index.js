@@ -1,6 +1,8 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors'); // Make sure this is installed
+const helmet = require('helmet');
+const { globalLimiter, authLimiter, aiLimiter } = require('./src/middleware/rateLimits');
 
 // Import route modules
 const authRoutes = require('./src/routes/authRoutes');
@@ -28,6 +30,9 @@ const pushRoutes = require('./src/routes/pushRoutes');
 
 
 const app = express();
+// Behind Vercel's proxy: use X-Forwarded-For for the client IP (rate limits).
+app.set('trust proxy', 1);
+app.use(helmet());
 
 // --- IMPORTANT: CORS CONFIGURATION ---
 const allowedOrigins = [
@@ -52,8 +57,12 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'Accept-Language']
 }));
 
+// Stripe webhook needs the raw body for signature checks — before express.json().
+app.post('/wallet/stripe-webhook', express.raw({ type: 'application/json' }), walletRoutes.stripeWebhook);
+
 // Middleware for JSON
 app.use(express.json());
+app.use(globalLimiter);
 
 // --- Simple Test & Health Check Routes ---
 app.get('/', (req, res) => {
@@ -61,7 +70,7 @@ app.get('/', (req, res) => {
 });
 
 // --- Use Route Modules ---
-app.use('/auth', authRoutes);
+app.use('/auth', authLimiter, authRoutes);
 app.use('/users', userRoutes);
 app.use('/services', serviceRoutes);
 app.use('/home', homeRoutes);
@@ -76,7 +85,7 @@ app.use('/feeds', feedRoutes);
 app.use('/chats', chatRoutes); 
 app.use('/reviews', reviewRoutes);
 app.use('/upgrades', upgradeRoutes);
-app.use('/ai', aiRoutes);
+app.use('/ai', aiLimiter, aiRoutes);
 app.use('/swap-requests', swapRoutes);
 app.use('/cron', cronRoutes);
 app.use('/push', pushRoutes);
