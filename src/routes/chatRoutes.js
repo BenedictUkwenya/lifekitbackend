@@ -29,6 +29,22 @@ const insertSystemStatusMessage = async (bookingId, status) => {
   }
 };
 
+/** Loads a booking only if the user is its client or provider. */
+async function loadOwnBooking(bookingId, userId, columns = 'id, status, client_id, provider_id, services(title)') {
+  if (!bookingId) return null;
+  const { data: booking } = await supabaseAdmin
+    .from('bookings')
+    .select(columns)
+    .eq('id', bookingId)
+    .maybeSingle();
+  if (!booking || (booking.client_id !== userId && booking.provider_id !== userId)) return null;
+  return booking;
+}
+
+// Placeholder text stored with photo messages so chat-list previews (which
+// only read `content`) still show something meaningful.
+const PHOTO_PLACEHOLDER = '📷 Photo';
+
 // =============================================================================
 // 1. GET /chats - Get List of Conversations (Grouped by User)
 // =============================================================================
@@ -179,6 +195,11 @@ router.get('/:bookingId', authenticateToken, async (req, res) => {
   const { bookingId } = req.params;
 
   try {
+    // Only the booking's client or provider may read its conversation.
+    if (!(await loadOwnBooking(bookingId, req.user.id, 'id, client_id, provider_id'))) {
+      return res.status(404).json({ error: 'Conversation not found.' });
+    }
+
     const { data: messages, error } = await supabaseAdmin
       .from('messages')
       .select('*')
@@ -199,18 +220,24 @@ router.get('/:bookingId', authenticateToken, async (req, res) => {
 // 4. POST /chats/message - Send Message & Notify (With Status Check)
 // =============================================================================
 router.post('/message', authenticateToken, async (req, res) => {
-  const { booking_id, content } = req.body;
+  const { booking_id } = req.body;
   const senderId = req.user.id;
+  const text = typeof req.body.content === 'string' ? req.body.content.trim() : '';
+  const imageUrl = typeof req.body.image_url === 'string' ? req.body.image_url.trim() : '';
+
+  // Photos must come from our own storage bucket (uploaded via /storage).
+  const storagePrefix = `${process.env.SUPABASE_URL}/storage/v1/object/public/`;
+  if (imageUrl && !imageUrl.startsWith(storagePrefix)) {
+    return res.status(400).json({ error: 'Invalid image.' });
+  }
+  if (!text && !imageUrl) return res.status(400).json({ error: 'Message is empty.' });
+  if (text.length > 2000) return res.status(400).json({ error: 'Message is too long.' });
+  const content = text || PHOTO_PLACEHOLDER;
 
   try {
-    // 1. Fetch Booking Status & Details
-    const { data: booking, error: bookingError } = await supabaseAdmin
-      .from('bookings')
-      .select('status, client_id, provider_id, services(title)')
-      .eq('id', booking_id)
-      .single();
-
-    if (bookingError || !booking) return res.status(404).json({ error: "Booking not found" });
+    // 1. Fetch Booking — and make sure the sender is part of it.
+    const booking = await loadOwnBooking(booking_id, senderId);
+    if (!booking) return res.status(404).json({ error: "Booking not found" });
 
     // 2. SECURITY CHECK: Is the booking active?
     // Prevent messaging if the service is already finished or cancelled
@@ -231,7 +258,8 @@ router.post('/message', authenticateToken, async (req, res) => {
         booking_id,
         sender_id: senderId,
         content,
-        is_read: false
+        is_read: false,
+        ...(imageUrl ? { image_url: imageUrl } : {}),
       });
 
     if (msgError) throw msgError;
