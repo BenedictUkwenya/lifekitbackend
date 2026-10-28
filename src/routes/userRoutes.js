@@ -144,33 +144,40 @@ router.post('/onboarding-plan/progress', authenticateToken, async (req, res) => 
 // 2. UPDATE PROFILE (Fixed: Ensures Email exists for Upsert)
 // =============================================================================
 router.put('/profile', authenticateToken, async (req, res) => {
-  const { full_name, profile_picture_url, username, phone_number, bio, job_title } = req.body;
+  const { full_name, profile_picture_url, username, phone_number, bio, job_title, email_notifications_enabled } = req.body;
   const userId = req.user.id;
 
   try {
     // 1. Prepare Data
     const updateData = { id: userId };
-    
+
     if (full_name !== undefined) updateData.full_name = full_name;
     if (profile_picture_url !== undefined) updateData.profile_picture_url = profile_picture_url;
     if (username !== undefined) updateData.username = username;
     if (phone_number !== undefined) updateData.phone_number = phone_number;
     if (bio !== undefined) updateData.bio = bio;
     if (job_title !== undefined) updateData.job_title = job_title;
+    if (typeof email_notifications_enabled === 'boolean') {
+      updateData.email_notifications_enabled = email_notifications_enabled;
+    }
 
-    // 2. SAFETY NET: Fetch Email/Name if missing
-    // Since we are using upsert, we MUST have an email if a new row is created.
-    // We fetch it from the Auth system (supabaseAdmin) just in case.
-    const { data: userData, error: userError } = await supabaseAdmin.auth.admin.getUserById(userId);
-    
-    if (userData && userData.user) {
-        // Ensure email is present
+    // 2. SAFETY NET for upsert: a NEW profile row needs email + name. Only
+    // fill them in when the row doesn't exist yet — otherwise a partial update
+    // (e.g. just a setting) would overwrite a name the user changed later.
+    const { data: existing } = await supabaseAdmin
+      .from('profiles')
+      .select('id')
+      .eq('id', userId)
+      .maybeSingle();
+
+    if (!existing) {
+      const { data: userData } = await supabaseAdmin.auth.admin.getUserById(userId);
+      if (userData && userData.user) {
         updateData.email = userData.user.email;
-        
-        // Ensure full_name is present (if not sent in body)
         if (!updateData.full_name) {
-            updateData.full_name = userData.user.user_metadata.full_name || "LifeKit User";
+          updateData.full_name = userData.user.user_metadata.full_name || "LifeKit User";
         }
+      }
     }
 
     // 3. Perform Upsert
