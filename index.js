@@ -26,6 +26,7 @@ const aiRoutes = require('./src/routes/aiRoutes');
 const swapRoutes = require('./src/routes/swapRoutes');
 const cronRoutes = require('./src/routes/cronRoutes');
 const pushRoutes = require('./src/routes/pushRoutes');
+const waitlistRoutes = require('./src/routes/waitlistRoutes');
 // ...
 
 
@@ -89,6 +90,7 @@ app.use('/ai', aiLimiter, aiRoutes);
 app.use('/swap-requests', swapRoutes);
 app.use('/cron', cronRoutes);
 app.use('/push', pushRoutes);
+app.use('/waitlist', waitlistRoutes);
 
 
 // --- SERVER STARTUP (Modified for Vercel) ---

@@ -71,3 +71,8 @@ test('security headers are set', async () => {
   const res = await fetch(base + '/');
   assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
 });
+
+test('waitlist rejects an invalid email', async () => {
+  const res = await post('/waitlist', { email: 'not-an-email' });
+  assert.equal(res.status, 400);
+});
