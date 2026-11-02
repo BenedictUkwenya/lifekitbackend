@@ -305,11 +305,11 @@ router.delete('/posts/:id/comments/:commentId', authenticateToken, async (req, r
   const userId = req.user.id;
   try {
     const { data: comment, error: fetchErr } = await supabaseAdmin
-      .from('comments').select('user_id, post_id').eq('id', commentId).maybeSingle();
+      .from('post_comments').select('user_id, post_id').eq('id', commentId).maybeSingle();
     if (fetchErr || !comment) return res.status(404).json({ error: 'Comment not found.' });
     if (comment.user_id !== userId) return res.status(403).json({ error: 'You can only delete your own comments.' });
 
-    const { error } = await supabaseAdmin.from('comments').delete().eq('id', commentId);
+    const { error } = await supabaseAdmin.from('post_comments').delete().eq('id', commentId);
     if (error) throw error;
 
     // Decrement comments_count
