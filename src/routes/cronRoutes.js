@@ -214,7 +214,8 @@ router.get('/check-user-inactivity', async (req, res) => {
     const { data: profiles, error } = await supabaseAdmin
       .from('profiles')
       .select('id, language, last_active_at, email')
-      .not('email', 'is', null);
+      .not('email', 'is', null)
+      .or('status.is.null,status.neq.deleted');
 
     if (error) throw error;
 
