@@ -40,9 +40,17 @@ function localiseService(svc, lang) {
 const SERVICE_LIMITS_BY_TIER = {
     free: 0,   // Free plan: cannot post services
     plus: 1,
-    pro: 5,
+    pro: 3,
     business: Infinity
 };
+
+/** The plan rules that apply to a provider right now (trial counts as Pro). */
+function resolveServicePlan(profile) {
+    const tier = normalizeTier(profile?.subscription_tier);
+    const isTrial = !!(profile?.trial_end_date && new Date(profile.trial_end_date) > new Date());
+    const effectiveTier = isTrial && (SERVICE_LIMITS_BY_TIER[tier] ?? 0) < SERVICE_LIMITS_BY_TIER.pro ? 'pro' : tier;
+    return { tier: effectiveTier, isTrial, limit: SERVICE_LIMITS_BY_TIER[effectiveTier] ?? SERVICE_LIMITS_BY_TIER.free };
+}
 
 const normalizeTier = (tier) => {
     if (!tier || typeof tier !== 'string') return 'free';
@@ -82,9 +90,22 @@ router.get('/my-services', authenticateToken, async (req, res) => {
             return res.status(500).json({ error: 'Failed to fetch your services.' });
         }
 
+        const { data: planProfile } = await supabaseAdmin
+            .from('profiles')
+            .select('subscription_tier, trial_end_date')
+            .eq('id', providerId)
+            .maybeSingle();
+        const plan = resolveServicePlan(planProfile);
+
         res.status(200).json({
             message: 'Your services fetched successfully!',
             services: (services || []).map(s => localiseService(s, lang)),
+            limits: {
+                tier: plan.tier,
+                is_trial: plan.isTrial,
+                limit: plan.limit === Infinity ? null : plan.limit, // null = unlimited
+                used: (services || []).length,
+            },
         });
 
     } catch (error) {
@@ -140,12 +161,6 @@ router.post('/', authenticateToken, async (req, res) => {
 
         if (profileError) throw profileError;
 
-        const subscriptionTier = normalizeTier(profile?.subscription_tier);
-
-        // Trial check: if trial is active, treat the user as 'pro' for limit purposes
-        const isTrialActive = profile?.trial_end_date && new Date(profile.trial_end_date) > new Date();
-        const effectiveTier = isTrialActive ? 'pro' : subscriptionTier;
-
         const servicesToCreateCount = (parentCat && parentCat.is_standalone) ? 1 : selectedCats.length;
 
         const { count: existingServicesCount, error: existingServicesError } = await supabaseAdmin
@@ -156,9 +171,9 @@ router.post('/', authenticateToken, async (req, res) => {
         if (existingServicesError) throw existingServicesError;
 
         const currentServicesCount = existingServicesCount || 0;
-        const serviceLimit = SERVICE_LIMITS_BY_TIER[effectiveTier] ?? SERVICE_LIMITS_BY_TIER.free;
+        const { limit: serviceLimit } = resolveServicePlan(profile);
         if (serviceLimit !== Infinity && (currentServicesCount + servicesToCreateCount) > serviceLimit) {
-            return res.status(403).json({ error: 'Plan limit reached' });
+            return res.status(403).json({ error: 'Plan limit reached', limit: serviceLimit, used: currentServicesCount });
         }
 
         if (parentCat && parentCat.is_standalone) {
@@ -183,7 +198,7 @@ router.post('/', authenticateToken, async (req, res) => {
                     currency: currency,
                     image_urls: [],
                     service_type: 'Home Service (HS)',
-                    status: 'active',
+                    status: 'draft', // hidden from clients until details and a price are saved
                     service_options: options,
                     is_skill_swap_available: is_skill_swap_available
                 })
@@ -211,7 +226,7 @@ router.post('/', authenticateToken, async (req, res) => {
             currency: currency,
             image_urls: [], 
             service_type: 'Default',
-            status: 'active',
+            status: 'draft', // hidden from clients until details and a price are saved
             is_skill_swap_available: is_skill_swap_available
         }));
 
@@ -287,7 +302,9 @@ router.put('/:id', authenticateToken, async (req, res) => {
 
         const hasServiceFieldUpdates = Object.keys(updateData).length > 0;
         const statusOnlyUpdate = hasServiceFieldUpdates && Object.keys(updateData).every((key) => key === 'status');
-        const shouldCountEdit = hasServiceFieldUpdates && !statusOnlyUpdate;
+        // Filling in a new service for the first time isn't an "edit".
+        const isInitialSetup = existingService.status === 'draft' || !(Number(existingService.price) > 0);
+        const shouldCountEdit = hasServiceFieldUpdates && !statusOnlyUpdate && !isInitialSetup;
 
         if (shouldCountEdit && (existingService.edit_count || 0) >= 2) {
             return res.status(403).json({
