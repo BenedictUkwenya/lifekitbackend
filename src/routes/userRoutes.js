@@ -5,6 +5,7 @@ const router = express.Router();
 const { supabase, supabaseAdmin } = require('../config/supabase');
 const authenticateToken = require('../middleware/authMiddleware');
 const { translateText } = require('../utils/autoTranslate');
+const { getDeletionBlocker, deleteAccount } = require('../services/accountDeletionService');
 
 // ── i18n helper ───────────────────────────────────────────────────────────────
 function getLang(req) {
@@ -206,31 +207,42 @@ router.put('/profile', authenticateToken, async (req, res) => {
 // =============================================================================
 // DELETE PROFILE
 // =============================================================================
+const DELETION_BLOCKED_MESSAGES = {
+  wallet_balance: {
+    en: 'Withdraw your wallet balance before deleting your account, or contact hello@lifekithub.com.',
+    ka: 'ანგარიშის წაშლამდე გაიტანეთ საფულის ნაშთი ან დაგვიკავშირდით: hello@lifekithub.com.',
+    ru: 'Перед удалением аккаунта выведите средства из кошелька или напишите на hello@lifekithub.com.',
+  },
+  open_booking: {
+    en: 'Finish or cancel your open bookings before deleting your account.',
+    ka: 'ანგარიშის წაშლამდე დაასრულეთ ან გააუქმეთ აქტიური ჯავშნები.',
+    ru: 'Перед удалением аккаунта завершите или отмените активные бронирования.',
+  },
+  open_dispute: {
+    en: 'You have an open dispute. Please wait for it to be resolved before deleting your account.',
+    ka: 'თქვენ გაქვთ ღია დავა. ანგარიშის წაშლამდე დაელოდეთ მის გადაწყვეტას.',
+    ru: 'У вас есть открытый спор. Дождитесь его решения, прежде чем удалять аккаунт.',
+  },
+};
+
 router.delete('/profile', authenticateToken, async (req, res) => {
   const userId = req.user.id;
 
   try {
-    const { error: profileError } = await supabaseAdmin
-      .from('profiles')
-      .update({
-        full_name: 'Deleted User',
-        email: `deleted_${userId}@deleted.local`,
-        profile_picture_url: null,
-        username: null,
-        phone_number: null,
-        bio: null,
-        job_title: null,
-        status: 'deleted'
-      })
-      .eq('id', userId);
-    if (profileError) throw profileError;
+    const blocker = await getDeletionBlocker(userId);
+    if (blocker) {
+      return res.status(409).json({
+        error: DELETION_BLOCKED_MESSAGES[blocker][getLang(req)],
+        code: blocker,
+      });
+    }
 
-    const { error: authError } = await supabaseAdmin.auth.admin.deleteUser(userId);
-    if (authError) throw authError;
+    await deleteAccount(userId);
 
     res.status(200).json({ message: 'Account deleted successfully' });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Account deletion failed:', error.message);
+    res.status(500).json({ error: 'Internal server error deleting account.' });
   }
 });
 

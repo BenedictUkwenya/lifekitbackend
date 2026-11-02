@@ -293,7 +293,8 @@ router.get('/search', async (req, res) => {
         const { data: providers } = await supabase
             .from('profiles')
             .select('id, full_name, profile_picture_url')
-            .ilike('full_name', `%${query}%`);
+            .ilike('full_name', `%${query}%`)
+            .or('status.is.null,status.neq.deleted');
             // .eq('is_service_provider', true); // Uncomment if you have this flag
 
         res.status(200).json({
