@@ -186,6 +186,8 @@ router.get('/events', async (req, res) => {
       .from('events')
       .select('*')
       .eq('is_active', true)
+      // Past events are hidden; today's events stay until the day ends (UTC).
+      .gte('event_date', new Date(new Date().setUTCHours(0, 0, 0, 0)).toISOString())
       .order('event_date', { ascending: true });
 
     if (error) throw error;

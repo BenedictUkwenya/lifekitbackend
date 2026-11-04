@@ -1,7 +1,7 @@
 // src/routes/homeRoutes.js
 const express = require('express');
 const router = express.Router();
-const { supabase } = require('../config/supabase');
+const { supabase, supabaseAdmin } = require('../config/supabase');
 const authenticateToken = require('../middleware/authMiddleware'); 
 
 // ── i18n helpers ──────────────────────────────────────────────────────────────
@@ -308,14 +308,16 @@ router.get('/search', async (req, res) => {
     }
 });
 
-// 6. Recent Searches (Mock)
+// 6. Recent Searches
 router.get('/recent-searches', authenticateToken, async (req, res) => {
-    res.status(200).json({
-        recent_searches: [
-            { id: '1', search_term: 'Hair Plaiting', created_at: new Date().toISOString() },
-            { id: '2', search_term: 'Barbing', created_at: new Date().toISOString() },
-        ]
-    });
+    const { data, error } = await supabaseAdmin
+        .from('user_recent_searches')
+        .select('id, search_term, created_at')
+        .eq('user_id', req.user.id)
+        .order('created_at', { ascending: false })
+        .limit(10);
+    if (error) return res.status(500).json({ error: error.message });
+    res.status(200).json({ recent_searches: data || [] });
 });
 
 // 7. NEW: Category Search (For Providers Creating Services - Dropdown)

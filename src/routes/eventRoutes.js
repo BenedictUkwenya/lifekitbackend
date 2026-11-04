@@ -186,6 +186,12 @@ router.delete('/:id', authenticateAdmin, async (req, res) => {
 // =============================================================================
 // BUY TICKET (unchanged logic, kept here)
 // =============================================================================
+function startOfToday() {
+  const d = new Date();
+  d.setUTCHours(0, 0, 0, 0);
+  return d;
+}
+
 router.post('/buy-ticket', authenticateToken, async (req, res) => {
   const { event_id } = req.body;
   const quantity = Number(req.body.quantity);
@@ -199,8 +205,10 @@ router.post('/buy-ticket', authenticateToken, async (req, res) => {
     // Price is computed server-side — a client-supplied total (e.g. negative)
     // would otherwise let buyers pay nothing or even credit their wallet.
     const { data: event } = await supabaseAdmin
-      .from('events').select('id, price, is_active').eq('id', event_id).maybeSingle();
-    if (!event || event.is_active === false) {
+      .from('events').select('id, price, is_active, event_date').eq('id', event_id).maybeSingle();
+    // Events stay on sale until the end of their day (UTC).
+    const ended = event?.event_date && new Date(event.event_date) < startOfToday();
+    if (!event || event.is_active === false || ended) {
       return res.status(404).json({ error: 'This event is no longer available.' });
     }
     const TICKET_SERVICE_FEE = 2.0; // mirrors EventBookingScreen._serviceFee

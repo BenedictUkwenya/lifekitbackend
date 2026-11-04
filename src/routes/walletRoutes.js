@@ -117,12 +117,23 @@ router.get('/', authenticateToken, async (req, res) => {
       .eq('id', userId)
       .single();
 
-    const { data: transactions } = await supabase
+    // Admin client: the anon client has no user session here, so row security
+    // hid every transaction. Scoped to this user's wallet id.
+    const { data: transactions } = await supabaseAdmin
       .from('transactions')
       .select('*')
       .eq('wallet_id', wallet.id)
       .order('created_at', { ascending: false })
       .limit(10);
+
+    const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const { data: weekEarnings } = await supabaseAdmin
+      .from('transactions')
+      .select('amount')
+      .eq('wallet_id', wallet.id)
+      .eq('type', 'earning')
+      .gte('created_at', weekAgo);
+    const weeklyIncome = (weekEarnings || []).reduce((sum, t) => sum + Number(t.amount || 0), 0);
 
     res.status(200).json({
       balance: wallet.balance,
@@ -130,6 +141,7 @@ router.get('/', authenticateToken, async (req, res) => {
       is_provider: profile?.is_service_provider || false,
       stripe_connect_id: profile?.stripe_connect_id || null,
       stripe_connected: !!profile?.stripe_connect_id,
+      weekly_income: Number(weeklyIncome.toFixed(2)),
       transactions: transactions || []
     });
   } catch (error) {
