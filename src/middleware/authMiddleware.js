@@ -14,7 +14,8 @@ async function authenticateToken(req, res, next) {
 
   if (error || !user) {
     console.error('Token verification failed:', error ? error.message : 'No user found.');
-    return res.status(403).json({ error: 'Invalid or expired token.' });
+    // 401 (not 403) so clients know to refresh the session and retry.
+    return res.status(401).json({ error: 'Invalid or expired token.' });
   }
 
   req.user = user; // Attach the user object to the request

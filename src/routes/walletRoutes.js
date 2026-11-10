@@ -170,7 +170,9 @@ router.post('/deposit', authenticateToken, async (req, res) => {
       amount: Math.round(numericAmount * 100),
       currency: 'usd',
       customer: wallet.stripe_customer_id,
-      automatic_payment_methods: { enabled: true },
+      // No redirect-based methods (Cash App Pay, Amazon Pay…): they are US-only
+      // and need an app return URL that the mobile app doesn't register.
+      automatic_payment_methods: { enabled: true, allow_redirects: 'never' },
       metadata: {
         userId: userId,
         walletId: wallet.id,
