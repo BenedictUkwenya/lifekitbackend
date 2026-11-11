@@ -439,9 +439,19 @@ router.get('/counts', authenticateToken, async (req, res) => {
                 .single();
 
               if (providerWallet) {
-                const newBalance =
-                  parseFloat(providerWallet.balance) +
-                  parseFloat(booking.total_price);
+                // Same commission as a normal completion (bookingRoutes).
+                const { data: providerProfile } = await supabaseAdmin
+                  .from('profiles')
+                  .select('trial_end_date')
+                  .eq('id', booking.provider_id)
+                  .maybeSingle();
+                const isTrialActive = providerProfile?.trial_end_date &&
+                  new Date(providerProfile.trial_end_date) > new Date();
+                const commissionRate = isTrialActive ? 0.03 : 0.08;
+                const earnings = parseFloat(
+                  (parseFloat(booking.total_price) * (1 - commissionRate)).toFixed(2),
+                );
+                const newBalance = parseFloat(providerWallet.balance) + earnings;
                 await supabaseAdmin
                   .from('wallets')
                   .update({ balance: newBalance })
@@ -450,9 +460,9 @@ router.get('/counts', authenticateToken, async (req, res) => {
                 await supabaseAdmin.from('transactions').insert({
                   wallet_id: providerWallet.id,
                   type: 'earning',
-                  amount: booking.total_price,
+                  amount: earnings,
                   status: 'success',
-                  description: `Auto-released funds for Booking #${booking.id} (client inactive 48h)`,
+                  description: `Auto-released funds for Booking #${booking.id} (client inactive 48h, commission ${commissionRate * 100}%)`,
                 });
               }
             }

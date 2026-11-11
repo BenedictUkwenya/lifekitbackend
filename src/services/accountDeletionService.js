@@ -27,6 +27,8 @@ const PERSONAL_ROWS = [
   ['active_boosts', 'user_id'],
   ['purchased_ai_tools', 'user_id'],
   ['support_tickets', 'user_id'],
+  ['event_likes', 'user_id'],
+  ['event_comments', 'user_id'],
   ['user_blocks', 'blocker_id'],
   ['user_blocks', 'blocked_id'],
 ];
