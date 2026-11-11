@@ -203,7 +203,8 @@ router.get('/events/:id/meta', authenticateToken, async (req, res) => {
   const userId = req.user.id;
   try {
     // Fetch all likes for this event to compute count + "liked by me"
-    const { data: likesData, error: likesError } = await supabase
+    // Admin client: these tables have row security with no public policies.
+    const { data: likesData, error: likesError } = await supabaseAdmin
       .from('event_likes')
       .select('user_id')
       .eq('event_id', eventId);
@@ -215,7 +216,7 @@ router.get('/events/:id/meta', authenticateToken, async (req, res) => {
       : false;
 
     // Fetch comments just for count
-    const { data: commentsData, error: commentsError } = await supabase
+    const { data: commentsData, error: commentsError } = await supabaseAdmin
       .from('event_comments')
       .select('id')
       .eq('event_id', eventId);
