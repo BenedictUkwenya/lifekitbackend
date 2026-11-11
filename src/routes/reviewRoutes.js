@@ -56,7 +56,8 @@ router.post('/', authenticateToken, async (req, res) => {
       .from('reviews')
       .insert({
         booking_id,
-        service_id: service_id || null,
+        // Reviews must reference a service; provider reviews don't send one.
+        service_id: service_id || booking.service_id,
         // Keep provider_id populated for client reviews (backwards compat)
         provider_id: reviewer_role === 'client' ? reviewee_id : null,
         reviewee_id,

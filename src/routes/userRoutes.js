@@ -419,11 +419,16 @@ router.get('/counts', authenticateToken, async (req, res) => {
           try {
             const serviceTitle = booking.services?.title || 'Service';
 
-            // 1. Mark booking as completed
-            await supabaseAdmin
+            // 1. Mark booking as completed — conditionally, so two requests
+            // arriving together can't both release (and double-pay) it.
+            const { data: released } = await supabaseAdmin
               .from('bookings')
               .update({ status: 'completed', updated_at: new Date().toISOString() })
-              .eq('id', booking.id);
+              .eq('id', booking.id)
+              .in('status', ['confirmed', 'pending'])
+              .select('id')
+              .maybeSingle();
+            if (!released) continue;
 
             // 2. Transfer funds to provider's wallet (only if price > 0)
             if (parseFloat(booking.total_price) > 0) {

@@ -367,14 +367,27 @@ router.put('/:id/status', authenticateToken, async (req, res) => {
 
     if (!booking) return res.status(404).json({ error: 'Booking not found or unauthorized.' });
 
+    // A provider accepts or declines a new request, or cancels one they
+    // accepted. Anything else (completed, cancelled, disputed) is final —
+    // otherwise a cancel would refund the client a second time.
+    const allowedFrom = status === 'confirmed' ? ['pending'] : ['pending', 'confirmed'];
+    if (!allowedFrom.includes(booking.status)) {
+      return res.status(409).json({ error: `This booking is already ${booking.status}.` });
+    }
+
+    // Conditional on the status so two taps at once can't both go through.
     const { data: updatedBooking, error } = await supabaseAdmin
       .from('bookings')
       .update({ status: status })
       .eq('id', id)
+      .in('status', allowedFrom)
       .select()
-      .single();
+      .maybeSingle();
 
     if (error) return res.status(500).json({ error: 'Failed to update status.' });
+    if (!updatedBooking) {
+      return res.status(409).json({ error: 'This booking was just updated. Please refresh.' });
+    }
 
     await chatRoutes.insertSystemStatusMessage(id, status);
 
@@ -433,6 +446,21 @@ router.put('/:id/complete', authenticateToken, async (req, res) => {
   try {
     const { data: booking } = await supabaseAdmin.from('bookings').select('*').eq('id', id).single();
     if (!booking) return res.status(404).json({ error: 'Booking not found.' });
+    if (booking.client_id !== userId && booking.provider_id !== userId) {
+      return res.status(403).json({ error: 'Unauthorized action.' });
+    }
+
+    // Only an accepted booking can be completed. Completed ones must not pay
+    // out again, and disputed ones wait for an admin decision.
+    if (booking.status !== 'confirmed') {
+      const reason = {
+        completed: 'This booking is already completed.',
+        disputed: 'This booking is under review. Our team will resolve the dispute.',
+        cancelled: 'This booking was cancelled.',
+        pending: 'The provider has to accept this booking first.',
+      }[booking.status] || `This booking is ${booking.status}.`;
+      return res.status(409).json({ error: reason });
+    }
 
     let updateData = {};
     // updated_at is stamped here so the 48-hour ghosted-escrow timer starts
@@ -453,7 +481,18 @@ router.put('/:id/complete', authenticateToken, async (req, res) => {
       .single();
 
     if (updatedBooking.client_confirmed && updatedBooking.provider_confirmed) {
-        await supabaseAdmin.from('bookings').update({ status: 'completed' }).eq('id', id);
+        // Only the request that actually flips the booking to completed pays
+        // the provider, so simultaneous confirmations can't pay twice.
+        const { data: justCompleted } = await supabaseAdmin
+          .from('bookings')
+          .update({ status: 'completed' })
+          .eq('id', id)
+          .eq('status', 'confirmed')
+          .select('id')
+          .maybeSingle();
+        if (!justCompleted) {
+          return res.json({ message: 'Booking already completed.', status: 'completed' });
+        }
         await chatRoutes.insertSystemStatusMessage(id, 'completed');
 
         if (booking.total_price > 0) {

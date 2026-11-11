@@ -753,6 +753,19 @@ router.post('/disputes/:bookingId/resolve', async (req, res) => {
       return res.status(400).json({ error: 'Dispute already resolved.' });
     }
 
+    // Claim the booking first: only a still-disputed booking can be settled,
+    // so resolving twice (or a completed booking) can't move money again.
+    const { data: claimed } = await supabaseAdmin
+      .from('bookings')
+      .update({ status: verdict === 'refund_client' ? 'cancelled' : 'completed' })
+      .eq('id', bookingId)
+      .eq('status', 'disputed')
+      .select('id')
+      .maybeSingle();
+    if (!claimed) {
+      return res.status(409).json({ error: `This booking is ${booking.status}, not disputed.` });
+    }
+
     if (verdict === 'refund_client') {
       await supabaseAdmin.from('bookings').update({ status: 'cancelled' }).eq('id', bookingId);
       await chatRoutes.insertSystemStatusMessage(bookingId, 'cancelled');
