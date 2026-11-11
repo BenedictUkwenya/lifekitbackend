@@ -343,13 +343,18 @@ router.post('/forgot-password', emailLimiter, async (req, res) => {
       console.error('Supabase generateLink recovery error:', error.message);
       // Do not reveal whether the email exists
     } else if (linkData?.properties?.action_link) {
-      emailService.sendPasswordResetEmail({
-        email: normalizedEmail,
-        resetLink: linkData.properties.action_link,
-        lang,
-      }).catch((err) => {
+      // Awaited: on Vercel the function is frozen as soon as it responds, so
+      // a fire-and-forget send was often never delivered.
+      try {
+        const sendResult = await emailService.sendPasswordResetEmail({
+          email: normalizedEmail,
+          resetLink: linkData.properties.action_link,
+          lang,
+        });
+        if (sendResult?.error) console.error('Password reset email failed:', sendResult.error);
+      } catch (err) {
         console.error('Password reset email failed:', err.message);
-      });
+      }
     }
 
     res.status(200).json({

@@ -101,7 +101,8 @@ async function notifyUser({
     const lang = getUserLang(profile);
     const url = actionUrl || defaultActionUrl(type, referenceId);
 
-    emailService.sendNotificationEmail({
+    // Awaited so Vercel doesn't freeze the function before the email is sent.
+    await emailService.sendNotificationEmail({
       email: profile.email,
       fullName: profile.full_name,
       title,
