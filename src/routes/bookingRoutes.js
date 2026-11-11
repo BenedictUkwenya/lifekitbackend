@@ -172,14 +172,22 @@ router.post('/', authenticateToken, async (req, res) => {
     }
 
     walletId = clientWallet.id;
-    const newBalance = parseFloat(clientWallet.balance) - price;
-    
-    const { error: walletUpdateError } = await supabaseAdmin
+    const newBalance = Math.round((parseFloat(clientWallet.balance) - price) * 100) / 100;
+
+    // Only applies if the balance is unchanged since we read it, so two
+    // bookings placed at once can't overdraw the wallet.
+    const { data: debited, error: walletUpdateError } = await supabaseAdmin
       .from('wallets')
       .update({ balance: newBalance })
-      .eq('id', walletId);
+      .eq('id', walletId)
+      .eq('balance', clientWallet.balance)
+      .select('id')
+      .maybeSingle();
 
     if (walletUpdateError) throw new Error('Failed to deduct funds.');
+    if (!debited) {
+      return res.status(409).json({ error: 'Your balance just changed. Please try again.' });
+    }
     deducted = true;
 
     await supabaseAdmin.from('transactions').insert({

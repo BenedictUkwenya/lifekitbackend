@@ -303,13 +303,14 @@ router.post('/withdraw', authenticateToken, async (req, res) => {
   const email = req.user.email;
 
   try {
-    if (!amount || Number(amount) <= 0) {
+    const amt = Math.round(Number(amount) * 100) / 100;
+    if (!Number.isFinite(amt) || amt <= 0) {
       return res.status(400).json({ error: 'Invalid amount.' });
     }
 
     const wallet = await getOrCreateWallet(userId, email);
 
-    if (parseFloat(wallet.balance) < Number(amount)) {
+    if (parseFloat(wallet.balance) < amt) {
       return res.status(400).json({ error: 'Insufficient funds' });
     }
 
@@ -323,31 +324,48 @@ router.post('/withdraw', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Stripe account not connected.' });
     }
 
-    const transfer = await stripe.transfers.create({
-      amount: Math.round(Number(amount) * 100),
-      currency: 'usd',
-      destination: profile.stripe_connect_id,
-      metadata: {
-        userId: userId,
-        walletId: wallet.id
-      }
-    });
-
-    if (!transfer || !transfer.id) {
-      return res.status(500).json({ error: 'Transfer failed.' });
-    }
-
-    const newBalance = parseFloat(wallet.balance) - parseFloat(amount);
-
-    await supabaseAdmin
+    // Reserve the money before paying out. The update only applies if the
+    // balance is still what we read, so two withdrawals at once can't both
+    // spend the same funds.
+    const newBalance = Math.round((parseFloat(wallet.balance) - amt) * 100) / 100;
+    const { data: reserved } = await supabaseAdmin
       .from('wallets')
       .update({ balance: newBalance })
-      .eq('id', wallet.id);
+      .eq('id', wallet.id)
+      .eq('balance', wallet.balance)
+      .select('id')
+      .maybeSingle();
+    if (!reserved) {
+      return res.status(409).json({ error: 'Your balance just changed. Please try again.' });
+    }
+
+    let transfer;
+    try {
+      transfer = await stripe.transfers.create({
+        amount: Math.round(amt * 100),
+        currency: 'usd',
+        destination: profile.stripe_connect_id,
+        metadata: {
+          userId: userId,
+          walletId: wallet.id
+        }
+      });
+      if (!transfer || !transfer.id) throw new Error('Transfer failed.');
+    } catch (transferError) {
+      // Payout didn't happen — give the reserved money back.
+      const { data: current } = await supabaseAdmin
+        .from('wallets').select('balance').eq('id', wallet.id).single();
+      await supabaseAdmin
+        .from('wallets')
+        .update({ balance: Math.round((parseFloat(current.balance) + amt) * 100) / 100 })
+        .eq('id', wallet.id);
+      throw transferError;
+    }
 
     await supabaseAdmin.from('transactions').insert({
       wallet_id: wallet.id,
       type: 'withdrawal',
-      amount: -amount,
+      amount: -amt,
       status: 'success',
       description: 'Stripe payout'
     });
