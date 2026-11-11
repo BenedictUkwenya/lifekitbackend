@@ -323,12 +323,13 @@ router.post('/forgot-password', emailLimiter, async (req, res) => {
     return res.status(400).json({ error: 'A valid email address is required.' });
   }
 
-  const MOBILE_REDIRECT = 'io.supabase.lifekit://reset-password';
+  // Mobile users also reset on the website. This server-generated link
+  // carries tokens in the URL hash (implicit flow), which the app's Supabase
+  // client (PKCE) ignores — the app opened but nothing happened.
   const WEB_REDIRECT_DEFAULT =
     process.env.PROVIDER_WEB_RESET_URL || 'https://www.lifekithub.com/reset-password';
 
-  const redirectTo =
-    redirect_to || (source === 'mobile' ? MOBILE_REDIRECT : WEB_REDIRECT_DEFAULT);
+  const redirectTo = redirect_to || WEB_REDIRECT_DEFAULT;
 
   try {
     const normalizedEmail = email.trim().toLowerCase();
