@@ -170,7 +170,8 @@ router.get('/incoming', authenticateToken, async (req, res) => {
         proposer:profiles!proposer_id ( id, full_name, profile_picture_url ),
         proposer_service:services!proposer_service_id ( id, title, image_urls, price ),
         target_service:services!target_service_id ( id, title, image_urls, price ),
-        booking:bookings!booking_id ( status, client_confirmed, provider_confirmed )
+        booking:bookings!booking_id ( status, client_confirmed, provider_confirmed ),
+        reverse_booking:bookings!reverse_booking_id ( status, client_confirmed, provider_confirmed )
       `)
       .eq('target_user_id', userId)
       .in('status', ['pending', 'accepted'])
@@ -198,7 +199,8 @@ router.get('/outgoing', authenticateToken, async (req, res) => {
         target_user:profiles!target_user_id ( id, full_name, profile_picture_url ),
         proposer_service:services!proposer_service_id ( id, title, image_urls, price ),
         target_service:services!target_service_id ( id, title, image_urls, price ),
-        booking:bookings!booking_id ( status, client_confirmed, provider_confirmed )
+        booking:bookings!booking_id ( status, client_confirmed, provider_confirmed ),
+        reverse_booking:bookings!reverse_booking_id ( status, client_confirmed, provider_confirmed )
       `)
       .eq('proposer_id', userId)
       .order('created_at', { ascending: false });
@@ -322,21 +324,69 @@ router.put('/:id/accept', authenticateToken, async (req, res) => {
       type: 'system',
     });
 
-    // Update swap record
+    // The other half of the swap: the proposer receives the accepter's service.
+    // Only when a real service of the accepter's is known (a category alone can't be booked).
+    const returnServiceId = target_service_id || swap.target_service_id || null;
+    let reverseBooking = null;
+    if (returnServiceId) {
+      const { data: returnService } = await supabaseAdmin
+        .from('services')
+        .select('id, provider_id')
+        .eq('id', returnServiceId)
+        .maybeSingle();
+      if (returnService && returnService.provider_id === userId) {
+        const { data: rb, error: rbErr } = await supabaseAdmin
+          .from('bookings')
+          .insert({
+            service_id:       returnServiceId,
+            client_id:        swap.proposer_id,
+            provider_id:      userId,
+            scheduled_time:   finalScheduledTime,
+            total_price:      0,
+            location_details: 'Skill Swap',
+            service_type:     swap.service_type || 'Default',
+            status:           'confirmed',
+            comments:         swap.notes || 'Skill Swap',
+          })
+          .select()
+          .single();
+        if (rbErr) {
+          console.error('Swap reverse booking failed:', rbErr.message);
+        } else {
+          reverseBooking = rb;
+          await supabaseAdmin.from('messages').insert({
+            booking_id: rb.id,
+            sender_id: null,
+            content: `🤝 Skill Swap accepted! This is a $0 swap booking. Both parties are committed.`,
+            type: 'system',
+          });
+        }
+      }
+    }
+
+    // Update swap record (conditional, so two simultaneous accepts can't both win)
     const { data: updatedSwap, error: updateErr } = await supabaseAdmin
       .from('swap_requests')
       .update({
-        status:            'accepted',
-        target_service_id: target_service_id || swap.target_service_id || null,
-        booking_id:        booking.id,
-        scheduled_time:    finalScheduledTime,
-        updated_at:        new Date().toISOString(),
+        status:             'accepted',
+        target_service_id:  returnServiceId,
+        booking_id:         booking.id,
+        reverse_booking_id: reverseBooking?.id || null,
+        scheduled_time:     finalScheduledTime,
+        updated_at:         new Date().toISOString(),
       })
       .eq('id', swapId)
+      .eq('status', 'pending')
       .select()
-      .single();
+      .maybeSingle();
 
-    if (updateErr) throw updateErr;
+    if (updateErr || !updatedSwap) {
+      const extra = [booking.id, reverseBooking?.id].filter(Boolean);
+      await supabaseAdmin.from('messages').delete().in('booking_id', extra);
+      await supabaseAdmin.from('bookings').delete().in('id', extra);
+      if (updateErr) throw updateErr;
+      return res.status(404).json({ error: 'Swap request not found or already processed.' });
+    }
 
     const { data: proposerProfile } = await supabaseAdmin
       .from('profiles')
@@ -353,7 +403,7 @@ router.put('/:id/accept', authenticateToken, async (req, res) => {
       referenceId: swapId,
     });
 
-    return res.json({ swap: updatedSwap, booking });
+    return res.json({ swap: updatedSwap, booking, reverse_booking: reverseBooking });
   } catch (err) {
     console.error('PUT /swap-requests/:id/accept error:', err);
     return res.status(500).json({ error: 'Failed to accept swap.' });
@@ -532,7 +582,8 @@ router.get('/:id', authenticateToken, async (req, res) => {
         target_user:profiles!target_user_id ( id, full_name, profile_picture_url ),
         proposer_service:services!proposer_service_id ( id, title, image_urls, price, description ),
         target_service:services!target_service_id ( id, title, image_urls, price ),
-        booking:bookings!booking_id ( status, client_confirmed, provider_confirmed )
+        booking:bookings!booking_id ( status, client_confirmed, provider_confirmed ),
+        reverse_booking:bookings!reverse_booking_id ( status, client_confirmed, provider_confirmed )
       `)
       .eq('id', swapId)
       .or(`proposer_id.eq.${userId},target_user_id.eq.${userId}`)
