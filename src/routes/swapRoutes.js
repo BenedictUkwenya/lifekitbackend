@@ -169,7 +169,8 @@ router.get('/incoming', authenticateToken, async (req, res) => {
         *,
         proposer:profiles!proposer_id ( id, full_name, profile_picture_url ),
         proposer_service:services!proposer_service_id ( id, title, image_urls, price ),
-        target_service:services!target_service_id ( id, title, image_urls, price )
+        target_service:services!target_service_id ( id, title, image_urls, price ),
+        booking:bookings!booking_id ( status, client_confirmed, provider_confirmed )
       `)
       .eq('target_user_id', userId)
       .in('status', ['pending', 'accepted'])
@@ -196,7 +197,8 @@ router.get('/outgoing', authenticateToken, async (req, res) => {
         *,
         target_user:profiles!target_user_id ( id, full_name, profile_picture_url ),
         proposer_service:services!proposer_service_id ( id, title, image_urls, price ),
-        target_service:services!target_service_id ( id, title, image_urls, price )
+        target_service:services!target_service_id ( id, title, image_urls, price ),
+        booking:bookings!booking_id ( status, client_confirmed, provider_confirmed )
       `)
       .eq('proposer_id', userId)
       .order('created_at', { ascending: false });
@@ -255,6 +257,8 @@ router.get('/board', authenticateToken, async (req, res) => {
         proposer_service:services!proposer_service_id ( id, title, image_urls, price, description )
       `)
       .eq('status', 'pending')
+      // Proposals aimed at a specific person are private to the two of them.
+      .is('target_user_id', null)
       .neq('proposer_id', userId)
       .order('created_at', { ascending: false })
       .range(Number(offset), Number(offset) + Number(limit) - 1);
@@ -440,6 +444,8 @@ router.get('/board/ai-ranked', authenticateToken, async (req, res) => {
         proposer_service:services!proposer_service_id ( id, title, image_urls, price, description )
       `)
       .eq('status', 'pending')
+      // Proposals aimed at a specific person are private to the two of them.
+      .is('target_user_id', null)
       .neq('proposer_id', userId)
       .order('created_at', { ascending: false })
       .limit(Number(limit));
@@ -525,7 +531,8 @@ router.get('/:id', authenticateToken, async (req, res) => {
         proposer:profiles!proposer_id ( id, full_name, profile_picture_url ),
         target_user:profiles!target_user_id ( id, full_name, profile_picture_url ),
         proposer_service:services!proposer_service_id ( id, title, image_urls, price, description ),
-        target_service:services!target_service_id ( id, title, image_urls, price )
+        target_service:services!target_service_id ( id, title, image_urls, price ),
+        booking:bookings!booking_id ( status, client_confirmed, provider_confirmed )
       `)
       .eq('id', swapId)
       .or(`proposer_id.eq.${userId},target_user_id.eq.${userId}`)
