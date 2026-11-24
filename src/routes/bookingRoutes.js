@@ -227,6 +227,8 @@ router.post('/', authenticateToken, async (req, res) => {
       .eq('id', service.provider_id)
       .maybeSingle();
     const providerLang = getUserLang(providerProfile);
+    const { data: clientProfile } = await supabaseAdmin
+      .from('profiles').select('full_name').eq('id', clientId).maybeSingle();
     const isSwap = parseFloat(total_price) === 0;
 
     await notifyUser({
@@ -234,7 +236,7 @@ router.post('/', authenticateToken, async (req, res) => {
       title: isSwap
         ? t('notifications.bookingRequest.titleSwap', providerLang)
         : t('notifications.bookingRequest.title', providerLang),
-      message: t('notifications.bookingRequest.message', providerLang, { service: service.title }),
+      message: t('notifications.bookingRequest.message', providerLang, { service: service.title, name: clientProfile?.full_name || 'A client' }),
       type: 'booking_request',
       referenceId: booking.id,
     });
@@ -440,6 +442,117 @@ router.put('/:id/status', authenticateToken, async (req, res) => {
 
   } catch (error) {
     console.error('Status update error:', error.message);
+    res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
+/**
+ * 2b. PUT /bookings/:id/details - client edits time, address or notes
+ * Only while the provider hasn't answered yet (status 'pending').
+ */
+router.put('/:id/details', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const clientId = req.user.id;
+  const { scheduled_time, location_details, comments } = req.body;
+
+  const update = {};
+  if (scheduled_time !== undefined) {
+    const when = new Date(scheduled_time);
+    if (Number.isNaN(when.getTime()) || when < new Date(Date.now() - 5 * 60 * 1000)) {
+      return res.status(400).json({ error: 'Please choose a time in the future.' });
+    }
+    update.scheduled_time = when.toISOString();
+  }
+  if (location_details !== undefined) update.location_details = String(location_details).trim().slice(0, 300) || 'Address via Chat';
+  if (comments !== undefined) update.comments = String(comments).trim().slice(0, 1000);
+  if (!Object.keys(update).length) return res.status(400).json({ error: 'Nothing to change.' });
+
+  try {
+    const { data: booking } = await supabaseAdmin
+      .from('bookings').select('id, client_id, provider_id, status, services(title)')
+      .eq('id', id).maybeSingle();
+    if (!booking || booking.client_id !== clientId) {
+      return res.status(404).json({ error: 'Booking not found.' });
+    }
+    if (booking.status !== 'pending') {
+      return res.status(409).json({ error: 'The provider has already responded, so this booking can no longer be edited. Message them instead.' });
+    }
+
+    const { data: updated } = await supabaseAdmin
+      .from('bookings').update({ ...update, updated_at: new Date().toISOString() })
+      .eq('id', id).eq('status', 'pending')
+      .select().maybeSingle();
+    if (!updated) return res.status(409).json({ error: 'This booking was just updated. Please refresh.' });
+
+    await notifyUser({
+      userId: booking.provider_id,
+      title: 'Booking updated ✏️',
+      message: `The client changed the details of "${booking.services?.title || 'a booking'}". Please review before accepting.`,
+      type: 'booking_update',
+      referenceId: id,
+    });
+
+    res.json({ message: 'Booking updated.', booking: updated });
+  } catch (error) {
+    console.error('Booking edit error:', error.message);
+    res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
+/**
+ * 2c. PUT /bookings/:id/cancel - client cancels before the provider answers
+ * Refunds the held amount to the client's wallet.
+ */
+router.put('/:id/cancel', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const clientId = req.user.id;
+
+  try {
+    const { data: booking } = await supabaseAdmin
+      .from('bookings').select('id, client_id, provider_id, status, total_price, services(title)')
+      .eq('id', id).maybeSingle();
+    if (!booking || booking.client_id !== clientId) {
+      return res.status(404).json({ error: 'Booking not found.' });
+    }
+    if (booking.status !== 'pending') {
+      return res.status(409).json({ error: 'The provider has already responded. Message them or open a dispute to cancel.' });
+    }
+
+    // Claim the booking first so a refund can only happen once.
+    const { data: cancelled } = await supabaseAdmin
+      .from('bookings').update({ status: 'cancelled', updated_at: new Date().toISOString() })
+      .eq('id', id).eq('status', 'pending')
+      .select('id').maybeSingle();
+    if (!cancelled) return res.status(409).json({ error: 'This booking was just updated. Please refresh.' });
+
+    const amount = parseFloat(booking.total_price) || 0;
+    if (amount > 0) {
+      const { data: wallet } = await supabaseAdmin
+        .from('wallets').select('id, balance').eq('user_id', clientId).single();
+      await supabaseAdmin
+        .from('wallets').update({ balance: Math.round((parseFloat(wallet.balance) + amount) * 100) / 100 })
+        .eq('id', wallet.id);
+      await supabaseAdmin.from('transactions').insert({
+        wallet_id: wallet.id,
+        type: 'refund',
+        amount,
+        status: 'success',
+        description: `Refund: you cancelled Booking #${id}`,
+      });
+    }
+
+    await chatRoutes.insertSystemStatusMessage(id, 'cancelled');
+    await notifyUser({
+      userId: booking.provider_id,
+      title: 'Booking cancelled',
+      message: `The client cancelled their request for "${booking.services?.title || 'a service'}".`,
+      type: 'booking_update',
+      referenceId: id,
+    });
+
+    res.json({ message: 'Booking cancelled and refunded.', refunded: amount });
+  } catch (error) {
+    console.error('Client cancel error:', error.message);
     res.status(500).json({ error: 'Internal server error.' });
   }
 });

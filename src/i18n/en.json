@@ -65,7 +65,7 @@
     "bookingRequest": {
       "title": "New Booking Request 📅",
       "titleSwap": "New Skill Swap Request 🔄",
-      "message": "Someone wants to book \"{{service}}\"."
+      "message": "{{name}} wants to book \"{{service}}\"."
     },
     "bookingUpdateConfirmed": {
       "title": "Booking Confirmed!",

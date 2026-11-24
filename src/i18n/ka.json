@@ -65,7 +65,7 @@
     "bookingRequest": {
       "title": "ახალი ჯავშნის მოთხოვნა 📅",
       "titleSwap": "ახალი Skill Swap მოთხოვნა 🔄",
-      "message": "ვინმე სურს დაჯავშნოს \"{{service}}\"."
+      "message": "{{name}}-ს სურს დაჯავშნოს \"{{service}}\"."
     },
     "bookingUpdateConfirmed": {
       "title": "ჯავშან დადასტურდა!",
