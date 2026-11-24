@@ -789,11 +789,18 @@ router.post('/disputes/:bookingId/resolve', async (req, res) => {
         const { data: providerWallet } = await supabaseAdmin
           .from('wallets').select('*').eq('user_id', booking.provider_id).maybeSingle();
         if (!providerWallet) return res.status(409).json({ error: 'Provider wallet not found.' });
-        const newBalance = parseFloat(providerWallet.balance) + parseFloat(booking.total_price);
+        // Same commission as a normal completion (bookingRoutes).
+        const { data: providerProfile } = await supabaseAdmin
+          .from('profiles').select('trial_end_date').eq('id', booking.provider_id).maybeSingle();
+        const isTrialActive = providerProfile?.trial_end_date &&
+          new Date(providerProfile.trial_end_date) > new Date();
+        const commissionRate = isTrialActive ? 0.03 : 0.08;
+        const earnings = parseFloat((parseFloat(booking.total_price) * (1 - commissionRate)).toFixed(2));
+        const newBalance = parseFloat(providerWallet.balance) + earnings;
         await supabaseAdmin.from('wallets').update({ balance: newBalance }).eq('id', providerWallet.id);
         await supabaseAdmin.from('transactions').insert({
-          wallet_id: providerWallet.id, type: 'earning', amount: booking.total_price,
-          status: 'success', description: `Admin payout for Booking #${bookingId}`
+          wallet_id: providerWallet.id, type: 'earning', amount: earnings,
+          status: 'success', description: `Admin payout for Booking #${bookingId} (commission ${commissionRate * 100}%)`
         });
       }
     }

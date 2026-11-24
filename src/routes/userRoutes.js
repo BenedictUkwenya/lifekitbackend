@@ -396,8 +396,9 @@ router.get('/counts', authenticateToken, async (req, res) => {
     if (activeBookingsError) throw activeBookingsError;
 
     // ── Lazy ghosted-escrow auto-release (48-hour rule) ───────────────────
-    // Runs fire-and-forget so a failure never blocks the count response.
-    (async () => {
+    // Awaited (errors are caught inside): on Vercel, work left running after
+    // the response is frozen, so a fire-and-forget release never happened.
+    await (async () => {
       try {
         const now    = new Date();
         const cutoff = new Date(now.getTime() - 48 * 60 * 60 * 1000);
@@ -500,8 +501,8 @@ router.get('/counts', authenticateToken, async (req, res) => {
     // ── End ghosted-escrow auto-release ───────────────────────────────────
 
     // ── Lazy proactive reminders ───────────────────────────────────────────
-    // Run fire-and-forget so reminder failures never block the count response.
-    (async () => {
+    // Awaited for the same reason; failures are caught inside and never block.
+    await (async () => {
       try {
         const now = new Date();
         const h2  = new Date(now.getTime() + 2  * 60 * 60 * 1000);
