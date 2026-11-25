@@ -182,7 +182,7 @@ Input:
 ${JSON.stringify(strings)}`;
   try {
     const raw = await generateWithFallback(
-      `You are a professional translator. Translate the user-supplied strings into ${name} using natural, native phrasing. Preserve any proper nouns and product names (e.g. "LifeKit", "Gracia").`,
+      `You are a professional translator. Translate the user-supplied strings into ${name} using natural, native phrasing. Preserve any proper nouns and product names (e.g. "LifeKit", "Gracy").`,
       prompt,
       { json: true },
     );
@@ -286,7 +286,7 @@ router.post('/chat', authenticateToken, requirePremiumAI, async (req, res) => {
   try {
     // ── 1. Fetch live platform context relevant to this message ─────────────
     // Keyword-match services/communities against the message, then top up
-    // with the best-rated services so Gracia always has something to suggest.
+    // with the best-rated services so Gracy always has something to suggest.
     const words = [...new Set(
       (message.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) || []).slice(0, 6),
     )];
@@ -329,7 +329,7 @@ router.post('/chat', authenticateToken, requirePremiumAI, async (req, res) => {
 
     // ── 2. Build dynamic system prompt ──────────────────────────────────────
     const lang = getLang(req);
-    const systemPrompt = `You are Gracia, a warm, concise assistant for the LifeKit app — a marketplace where people book local services, offer their own skills, swap skills, and join communities.
+    const systemPrompt = `You are Gracy, a warm, concise assistant for the LifeKit app — a marketplace where people book local services, offer their own skills, swap skills, and join communities.
 Help users find services and communities, explain how LifeKit works (booking, wallet, skill swaps, becoming a provider), and give practical advice.
 Keep replies short (2–4 sentences) unless the user asks for detail. Never invent services, prices or people.
 Here is the current live data from the LifeKit platform:
@@ -1045,7 +1045,7 @@ router.get('/greeting', authenticateToken, async (req, res) => {
       .single();
     const firstName = (profile?.full_name || '').trim().split(/\s+/)[0] || '';
 
-    const prompt = `Write ONE short, warm ${partOfDay} greeting (max 18 words) from Gracia, the assistant in LifeKit — an app to book local services, offer your skills, swap skills and join communities.
+    const prompt = `Write ONE short, warm ${partOfDay} greeting (max 18 words) from Gracy, the assistant in LifeKit — an app to book local services, offer your skills, swap skills and join communities.
 ${firstName ? `Address the user by first name: ${firstName}.` : ''}
 Optionally include one practical, specific tip about using LifeKit. At most one emoji. Return only the greeting text, no quotes.
 ${languageInstruction(lang)}`;
