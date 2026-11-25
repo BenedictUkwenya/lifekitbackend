@@ -825,7 +825,11 @@ If it's morning, suggest starting the day. If it's evening, suggest relaxing or 
 Always tie it back to their location.
 
 USER PROFILE: ${userBio || 'Not provided'}
-LOCATION: ${city.trim()}
+LOCATION: ${/^georgia$/i.test(city.trim())
+    // "Georgia" here is LifeKit's market (the country), not the US state —
+    // without this the model suggests Savannah or Atlanta.
+    ? 'Georgia (the country in the South Caucasus, e.g. Tbilisi, Batumi, Kutaisi; NOT the US state)'
+    : city.trim()}
 LOCAL TIME: ${local_time.trim()}
 
 Return ONLY valid JSON in this exact format:
