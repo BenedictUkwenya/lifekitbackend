@@ -17,6 +17,22 @@ async function getOrCreateWallet(userId, email) {
 
   // 2. If wallet exists, return it immediately
   if (wallet) {
+    // Wallets first created by an earning/refund have no Stripe customer yet,
+    // and Stripe rejects `customer: null` — attach one the first time it's needed.
+    if (!wallet.stripe_customer_id) {
+      const customer = await stripe.customers.create({ email, metadata: { userId } });
+      const { data: updated } = await supabaseAdmin
+        .from('wallets')
+        .update({ stripe_customer_id: customer.id })
+        .eq('id', wallet.id)
+        .is('stripe_customer_id', null)
+        .select('*')
+        .maybeSingle();
+      if (updated) return updated;
+      // Another request attached one first — use theirs.
+      const { data: fresh } = await supabaseAdmin.from('wallets').select('*').eq('id', wallet.id).single();
+      return fresh;
+    }
     return wallet;
   }
 
