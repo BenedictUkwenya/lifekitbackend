@@ -27,6 +27,7 @@ const swapRoutes = require('./src/routes/swapRoutes');
 const cronRoutes = require('./src/routes/cronRoutes');
 const pushRoutes = require('./src/routes/pushRoutes');
 const waitlistRoutes = require('./src/routes/waitlistRoutes');
+const publicRoutes = require('./src/routes/publicRoutes');
 // ...
 
 
@@ -91,6 +92,7 @@ app.use('/swap-requests', swapRoutes);
 app.use('/cron', cronRoutes);
 app.use('/push', pushRoutes);
 app.use('/waitlist', waitlistRoutes);
+app.use('/public', publicRoutes); // crawlable services directory (proxied by the website)
 
 
 // --- SERVER STARTUP (Modified for Vercel) ---

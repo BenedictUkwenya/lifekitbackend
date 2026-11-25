@@ -16,6 +16,31 @@ function localiseCategory(cat, lang) {
   return { ...cat, name: cat.name_translations?.[lang] || cat.name };
 }
 
+// Category ids that have at least one active service, counting a service in a
+// sub-category toward every ancestor. Client browse screens pass
+// ?with_services=1 so empty categories stay hidden; the provider "create
+// service" pickers call without it and still see every category.
+async function categoryIdsWithServices() {
+  const [{ data: svc, error: e1 }, { data: cats, error: e2 }] = await Promise.all([
+    supabaseAdmin.from('services').select('category_id').eq('status', 'active'),
+    supabaseAdmin.from('service_categories').select('id, parent_category_id'),
+  ]);
+  if (e1) throw e1;
+  if (e2) throw e2;
+  const parent = new Map((cats || []).map((c) => [c.id, c.parent_category_id]));
+  const ids = new Set();
+  for (const { category_id } of svc || []) {
+    let id = category_id;
+    for (let hops = 0; id && !ids.has(id) && hops < 10; hops++) {
+      ids.add(id);
+      id = parent.get(id);
+    }
+  }
+  return ids;
+}
+
+const wantsNonEmpty = (req) => req.query.with_services === '1' || req.query.with_services === 'true';
+
 function localiseService(svc, lang) {
   if (!svc || lang === 'en') return svc;
   const cat = svc.service_categories;
@@ -142,7 +167,9 @@ router.get('/explore', async (req, res) => {
     if (servicesResult.error) throw servicesResult.error;
 
     const featuredProviders = featuredProvidersResult.data || [];
-    const categories = (categoriesResult.data || []).map(c => localiseCategory(c, lang));
+    // Explore is a client screen: only categories that have services.
+    const nonEmpty = await categoryIdsWithServices();
+    const categories = (categoriesResult.data || []).filter(c => nonEmpty.has(c.id)).map(c => localiseCategory(c, lang));
     let services = servicesResult.data || [];
 
     services.sort((a, b) => {
@@ -178,10 +205,11 @@ router.get('/categories', async (req, res) => {
       .order('name', { ascending: true });
 
     if (error) throw error;
+    const nonEmpty = wantsNonEmpty(req) ? await categoryIdsWithServices() : null;
 
     res.status(200).json({
       message: 'Root categories fetched successfully!',
-      categories: (categories || []).map(c => localiseCategory(c, lang)),
+      categories: (categories || []).filter(c => !nonEmpty || nonEmpty.has(c.id)).map(c => localiseCategory(c, lang)),
     });
   } catch (error) {
     console.error('Categories Error:', error.message);
@@ -201,10 +229,11 @@ router.get('/categories/children/:parentId', async (req, res) => {
       .order('name', { ascending: true });
 
     if (error) throw error;
+    const nonEmpty = wantsNonEmpty(req) ? await categoryIdsWithServices() : null;
 
     res.status(200).json({
       message: 'Sub-categories fetched successfully!',
-      categories: (categories || []).map(c => localiseCategory(c, lang)),
+      categories: (categories || []).filter(c => !nonEmpty || nonEmpty.has(c.id)).map(c => localiseCategory(c, lang)),
     });
   } catch (error) {
     console.error('Sub-Categories Error:', error.message);
