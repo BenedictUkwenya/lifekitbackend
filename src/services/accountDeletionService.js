@@ -17,6 +17,7 @@ const CLOSED_BOOKING_STATUSES = '("completed","cancelled","rejected","declined")
 
 const PERSONAL_ROWS = [
   ['notifications', 'user_id'],
+  ['payment_details', 'user_id'], // bank details (IBAN) — personal data
   ['user_fcm_tokens', 'user_id'],
   ['user_recent_searches', 'user_id'],
   ['saved_posts', 'user_id'],

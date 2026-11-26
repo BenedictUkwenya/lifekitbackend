@@ -91,6 +91,12 @@
       "titleClient": "Booking Overdue ⚠️",
       "messageProvider": "⚠️ Is the work for \"{{service}}\" done? Please confirm it, or report an issue.",
       "messageClient": "⚠️ Job Overdue? Your service for \"{{service}}\" was scheduled for yesterday. Did it happen? Confirm receipt or Report an Issue."
+    },
+    "bookingPaid": {
+      "clientMarkedTitle": "Client says they paid 💳",
+      "clientMarkedMessage": "The client marked \"{{service}}\" as paid. Please check and confirm you received it.",
+      "providerConfirmedTitle": "Payment received ✅",
+      "providerConfirmedMessage": "The provider confirmed they received your payment for \"{{service}}\"."
     }
   },
   "errors": {

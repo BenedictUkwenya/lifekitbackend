@@ -28,6 +28,7 @@ const cronRoutes = require('./src/routes/cronRoutes');
 const pushRoutes = require('./src/routes/pushRoutes');
 const waitlistRoutes = require('./src/routes/waitlistRoutes');
 const publicRoutes = require('./src/routes/publicRoutes');
+const paymentDetailsRoutes = require('./src/routes/paymentDetailsRoutes');
 // ...
 
 
@@ -93,6 +94,7 @@ app.use('/cron', cronRoutes);
 app.use('/push', pushRoutes);
 app.use('/waitlist', waitlistRoutes);
 app.use('/public', publicRoutes); // crawlable services directory (proxied by the website)
+app.use('/payment-details', paymentDetailsRoutes); // how providers accept direct payment
 
 
 // --- SERVER STARTUP (Modified for Vercel) ---

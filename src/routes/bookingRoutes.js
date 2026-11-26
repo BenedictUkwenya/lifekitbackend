@@ -570,6 +570,61 @@ router.put('/:id/cancel', authenticateToken, async (req, res) => {
 });
 
 /**
+ * 2d. PUT /bookings/:id/paid - shared payment record for direct bookings.
+ * The client taps "I've paid", the provider taps "Payment received".
+ * No money moves through LifeKit; this is only a record both sides can see.
+ */
+router.put('/:id/paid', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const userId = req.user.id;
+  try {
+    const { data: booking } = await supabaseAdmin
+      .from('bookings')
+      .select('id, client_id, provider_id, status, total_price, payment_method, client_marked_paid_at, provider_confirmed_paid_at, services(title)')
+      .eq('id', id).maybeSingle();
+    if (!booking || (booking.client_id !== userId && booking.provider_id !== userId)) {
+      return res.status(404).json({ error: 'Booking not found.' });
+    }
+    if (booking.payment_method !== 'direct' || !(Number(booking.total_price) > 0)) {
+      return res.status(409).json({ error: 'This booking has no direct payment to record.' });
+    }
+    if (!['confirmed', 'completed', 'disputed'].includes(booking.status)) {
+      return res.status(409).json({ error: 'The provider has to accept this booking first.' });
+    }
+
+    const isClient = userId === booking.client_id;
+    const field = isClient ? 'client_marked_paid_at' : 'provider_confirmed_paid_at';
+    if (booking[field]) {
+      return res.json({ message: 'Already recorded.', booking });
+    }
+    const { data: updated } = await supabaseAdmin
+      .from('bookings')
+      .update({ [field]: new Date().toISOString() })
+      .eq('id', id).is(field, null)
+      .select().maybeSingle();
+    if (!updated) return res.json({ message: 'Already recorded.' });
+
+    const otherId = isClient ? booking.provider_id : booking.client_id;
+    const { data: other } = await supabaseAdmin
+      .from('profiles').select('language').eq('id', otherId).maybeSingle();
+    const lang = getUserLang(other);
+    const service = booking.services?.title || 'your booking';
+    await notifyUser({
+      userId: otherId,
+      title: t(isClient ? 'notifications.bookingPaid.clientMarkedTitle' : 'notifications.bookingPaid.providerConfirmedTitle', lang),
+      message: t(isClient ? 'notifications.bookingPaid.clientMarkedMessage' : 'notifications.bookingPaid.providerConfirmedMessage', lang, { service }),
+      type: 'booking_update',
+      referenceId: id,
+    });
+
+    res.json({ message: isClient ? 'Marked as paid.' : 'Payment confirmed.', booking: updated });
+  } catch (error) {
+    console.error('Mark paid error:', error.message);
+    res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
+/**
  * 3. PUT /bookings/:id/complete - DUAL CONFIRMATION
  */
 router.put('/:id/complete', authenticateToken, async (req, res) => {
