@@ -32,11 +32,11 @@
   "notifications": {
     "trialWarning": {
       "title": "⏳ Your Pro trial ends in {{days}} day{{plural}}",
-      "message": "Your free Pro trial ends on {{date}}. After that your account moves to the Free plan (1 service)."
+      "message": "Your free Pro trial ends on {{date}}. After that your account moves to the Free plan."
     },
     "trialExpired": {
       "title": "🔔 Your free Pro trial has ended",
-      "message": "Your 90-day launch trial is over and your account is now on the Free plan (1 service). Paid plans will be available soon."
+      "message": "Your 90-day launch trial is over and your account is now on the Free plan. Paid plans will be available soon."
     },
     "nudgeNoServices": {
       "title": "✨ Ready to start earning?",
