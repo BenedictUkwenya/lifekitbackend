@@ -4,6 +4,7 @@ const router = express.Router();
 const { supabaseAdmin } = require('../config/supabase'); 
 const authenticateAdmin = require('../middleware/adminMiddleware');
 const chatRoutes = require('./chatRoutes');
+const { heldInApp } = require('../config/payments');
 // ADDED: subMonths and format are needed for the charts
 const { startOfMonth, startOfWeek, startOfYear, subMonths, format } = require('date-fns');
 const { translateText } = require('../utils/autoTranslate');
@@ -770,7 +771,9 @@ router.post('/disputes/:bookingId/resolve', async (req, res) => {
       await supabaseAdmin.from('bookings').update({ status: 'cancelled' }).eq('id', bookingId);
       await chatRoutes.insertSystemStatusMessage(bookingId, 'cancelled');
 
-      if (booking.total_price > 0) {
+      // Money moves only for bookings paid in the app; for direct bookings the
+      // verdict just closes the booking (client and provider settle between them).
+      if (heldInApp(booking)) {
         const { data: clientWallet } = await supabaseAdmin
           .from('wallets').select('*').eq('user_id', booking.client_id).maybeSingle();
         if (!clientWallet) return res.status(409).json({ error: 'Client wallet not found.' });
@@ -785,7 +788,7 @@ router.post('/disputes/:bookingId/resolve', async (req, res) => {
       await supabaseAdmin.from('bookings').update({ status: 'completed' }).eq('id', bookingId);
       await chatRoutes.insertSystemStatusMessage(bookingId, 'completed');
 
-      if (booking.total_price > 0) {
+      if (heldInApp(booking)) {
         const { data: providerWallet } = await supabaseAdmin
           .from('wallets').select('*').eq('user_id', booking.provider_id).maybeSingle();
         if (!providerWallet) return res.status(409).json({ error: 'Provider wallet not found.' });
@@ -813,21 +816,26 @@ router.post('/disputes/:bookingId/resolve', async (req, res) => {
         .eq('id', dispute.id);
     }
 
-    // Notify both parties
+    // Notify both parties. Only mention wallets when money was held in the app.
+    const moneyMoved = heldInApp(booking);
     await supabaseAdmin.from('notifications').insert([
       {
         user_id: booking.client_id,
-        title: verdict === 'refund_client' ? 'Dispute Resolved: Refunded 💸' : 'Dispute Resolved',
+        title: verdict === 'refund_client' && moneyMoved ? 'Dispute Resolved: Refunded 💸' : 'Dispute Resolved',
         message: verdict === 'refund_client'
-          ? 'Admin resolved the dispute. Your funds have been refunded to your wallet.'
+          ? (moneyMoved
+            ? 'Admin resolved the dispute. Your funds have been refunded to your wallet.'
+            : 'Admin resolved the dispute in your favour and the booking was cancelled.')
           : 'Admin resolved the dispute in favor of the provider.',
         type: 'dispute_resolved', reference_id: bookingId, is_read: false,
       },
       {
         user_id: booking.provider_id,
-        title: verdict === 'pay_provider' ? 'Dispute Resolved: Paid 💰' : 'Dispute Resolved',
+        title: verdict === 'pay_provider' && moneyMoved ? 'Dispute Resolved: Paid 💰' : 'Dispute Resolved',
         message: verdict === 'pay_provider'
-          ? 'Admin resolved the dispute. Funds have been released to your wallet.'
+          ? (moneyMoved
+            ? 'Admin resolved the dispute. Funds have been released to your wallet.'
+            : 'Admin resolved the dispute in your favour and the booking was marked completed.')
           : 'Admin resolved the dispute in favor of the client.',
         type: 'dispute_resolved', reference_id: bookingId, is_read: false,
       },

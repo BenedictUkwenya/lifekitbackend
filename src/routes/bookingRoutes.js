@@ -5,6 +5,7 @@ const authenticateToken = require('../middleware/authMiddleware');
 const chatRoutes = require('./chatRoutes');
 const { t, getUserLang } = require('../utils/translate');
 const { notifyUser, notifyUsers } = require('../services/notificationService');
+const { IN_APP_PAYMENTS, heldInApp } = require('../config/payments');
 
 const isBookingOverdue = (booking, now = new Date()) => {
   const normalizedStatus = String(booking?.status || '').toLowerCase();
@@ -161,6 +162,11 @@ router.post('/', authenticateToken, async (req, res) => {
     const price = Math.round(claimed * 100) / 100;
     total_price = price;
 
+    // Clients pay providers directly unless in-app payments are switched on
+    // (see config/payments.js). Free bookings (swaps) never touch a wallet.
+    const payInApp = IN_APP_PAYMENTS && price > 0;
+
+    if (payInApp) {
     const { data: clientWallet, error: walletFetchError } = await supabaseAdmin
       .from('wallets')
       .select('id, balance')
@@ -197,6 +203,7 @@ router.post('/', authenticateToken, async (req, res) => {
       status: 'success',
       description: `Funds held for booking service: ${service.title}`
     });
+    }
 
     const { data: booking, error: bookingError } = await supabaseAdmin
       .from('bookings')
@@ -210,8 +217,9 @@ router.post('/', authenticateToken, async (req, res) => {
         service_type,
         comments,
         status: 'pending',
-        client_confirmed: false, 
-        provider_confirmed: false 
+        client_confirmed: false,
+        provider_confirmed: false,
+        payment_method: payInApp ? 'wallet' : 'direct',
       })
       .select()
       .single();
@@ -409,6 +417,9 @@ router.put('/:id/status', authenticateToken, async (req, res) => {
     const clientLang = getUserLang(clientProfile);
 
     if (status === 'cancelled') {
+        // Only money held in the app goes back; direct bookings had nothing taken.
+        const refunded = heldInApp(booking);
+        if (refunded) {
         const { data: clientWallet } = await supabaseAdmin.from('wallets').select('*').eq('user_id', booking.client_id).single();
         const refundBalance = parseFloat(clientWallet.balance) + parseFloat(booking.total_price);
         await supabaseAdmin.from('wallets').update({ balance: refundBalance }).eq('id', clientWallet.id);
@@ -420,11 +431,12 @@ router.put('/:id/status', authenticateToken, async (req, res) => {
             status: 'success',
             description: `Refund for Booking #${booking.id}`
         });
+        }
 
         await notifyUser({
             userId: booking.client_id,
             title: t('notifications.bookingUpdateDeclined.title', clientLang),
-            message: t('notifications.bookingUpdateDeclined.message', clientLang),
+            message: t(refunded ? 'notifications.bookingUpdateDeclined.messageRefunded' : 'notifications.bookingUpdateDeclined.message', clientLang),
             type: 'booking_update',
             referenceId: id,
         });
@@ -501,7 +513,7 @@ router.put('/:id/details', authenticateToken, async (req, res) => {
 
 /**
  * 2c. PUT /bookings/:id/cancel - client cancels before the provider answers
- * Refunds the held amount to the client's wallet.
+ * Refunds the held amount to the client's wallet (in-app paid bookings only).
  */
 router.put('/:id/cancel', authenticateToken, async (req, res) => {
   const { id } = req.params;
@@ -509,7 +521,7 @@ router.put('/:id/cancel', authenticateToken, async (req, res) => {
 
   try {
     const { data: booking } = await supabaseAdmin
-      .from('bookings').select('id, client_id, provider_id, status, total_price, services(title)')
+      .from('bookings').select('id, client_id, provider_id, status, total_price, payment_method, services(title)')
       .eq('id', id).maybeSingle();
     if (!booking || booking.client_id !== clientId) {
       return res.status(404).json({ error: 'Booking not found.' });
@@ -525,7 +537,7 @@ router.put('/:id/cancel', authenticateToken, async (req, res) => {
       .select('id').maybeSingle();
     if (!cancelled) return res.status(409).json({ error: 'This booking was just updated. Please refresh.' });
 
-    const amount = parseFloat(booking.total_price) || 0;
+    const amount = heldInApp(booking) ? parseFloat(booking.total_price) || 0 : 0;
     if (amount > 0) {
       const { data: wallet } = await supabaseAdmin
         .from('wallets').select('id, balance').eq('user_id', clientId).single();
@@ -550,7 +562,7 @@ router.put('/:id/cancel', authenticateToken, async (req, res) => {
       referenceId: id,
     });
 
-    res.json({ message: 'Booking cancelled and refunded.', refunded: amount });
+    res.json({ message: amount > 0 ? 'Booking cancelled and refunded.' : 'Booking cancelled.', refunded: amount });
   } catch (error) {
     console.error('Client cancel error:', error.message);
     res.status(500).json({ error: 'Internal server error.' });
@@ -616,7 +628,9 @@ router.put('/:id/complete', authenticateToken, async (req, res) => {
         }
         await chatRoutes.insertSystemStatusMessage(id, 'completed');
 
-        if (booking.total_price > 0) {
+        // Pay the provider only when the client's money was held in the app;
+        // direct bookings were paid to the provider outside LifeKit.
+        if (heldInApp(booking)) {
             // Fetch provider's trial status to determine commission rate
             const { data: providerProfile } = await supabaseAdmin
                 .from('profiles')
@@ -669,7 +683,10 @@ router.put('/:id/complete', authenticateToken, async (req, res) => {
             },
         ]);
 
-        return res.json({ message: 'Booking fully completed. Funds released.', status: 'completed' });
+        return res.json({
+          message: heldInApp(booking) ? 'Booking fully completed. Funds released.' : 'Booking fully completed.',
+          status: 'completed',
+        });
     }
 
     res.json({ message: 'Confirmation recorded. Waiting for the other party.', status: 'waiting_other' });

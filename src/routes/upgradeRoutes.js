@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { supabaseAdmin } = require('../config/supabase');
 const authenticateToken = require('../middleware/authMiddleware');
+const { requireInAppPayments } = require('../config/payments');
 
 const SUBSCRIPTION_PRICING = {
   plus: 6.99,
@@ -101,7 +102,7 @@ const recordPurchaseTransaction = async (walletId, amount, description) => {
   if (error) throw error;
 };
 
-router.post('/subscribe', authenticateToken, async (req, res) => {
+router.post('/subscribe', authenticateToken, requireInAppPayments, async (req, res) => {
   const userId = req.user.id;
   const tier = normalizeTier(req.body.tier);
   const price = SUBSCRIPTION_PRICING[tier];
@@ -171,7 +172,7 @@ router.post('/subscribe', authenticateToken, async (req, res) => {
   }
 });
 
-router.post('/boost', authenticateToken, async (req, res) => {
+router.post('/boost', authenticateToken, requireInAppPayments, async (req, res) => {
   const userId = req.user.id;
   const { target_id, boost_duration } = req.body;
 
@@ -264,7 +265,7 @@ router.post('/boost', authenticateToken, async (req, res) => {
 });
 
 // POST /upgrade/opportunity-boost — $4.99 per boost, no target needed
-router.post('/opportunity-boost', authenticateToken, async (req, res) => {
+router.post('/opportunity-boost', authenticateToken, requireInAppPayments, async (req, res) => {
   const userId = req.user.id;
 
   try {
@@ -309,7 +310,7 @@ router.post('/opportunity-boost', authenticateToken, async (req, res) => {
 });
 
 // POST /upgrade/bundle-boost — $19.99/month: 2x Service + 1x Profile + 2x Opportunity Boosts
-router.post('/bundle-boost', authenticateToken, async (req, res) => {
+router.post('/bundle-boost', authenticateToken, requireInAppPayments, async (req, res) => {
   const userId = req.user.id;
 
   try {

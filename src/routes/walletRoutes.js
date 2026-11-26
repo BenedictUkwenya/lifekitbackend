@@ -3,6 +3,7 @@ const router = express.Router();
 // IMPORT supabaseAdmin HERE
 const { supabase, supabaseAdmin } = require('../config/supabase'); 
 const authenticateToken = require('../middleware/authMiddleware');
+const { requireInAppPayments, IN_APP_PAYMENTS } = require('../config/payments');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 // Helper: Get or Create Wallet (Using Admin to bypass RLS for creation)
@@ -158,6 +159,7 @@ router.get('/', authenticateToken, async (req, res) => {
       stripe_connect_id: profile?.stripe_connect_id || null,
       stripe_connected: !!profile?.stripe_connect_id,
       weekly_income: Number(weeklyIncome.toFixed(2)),
+      in_app_payments: IN_APP_PAYMENTS,
       transactions: transactions || []
     });
   } catch (error) {
@@ -169,7 +171,7 @@ router.get('/', authenticateToken, async (req, res) => {
 /**
  * 2. POST /wallet/deposit - Create Payment Intent
  */
-router.post('/deposit', authenticateToken, async (req, res) => {
+router.post('/deposit', authenticateToken, requireInAppPayments, async (req, res) => {
   const { amount } = req.body;
   const userId = req.user.id;
   const email = req.user.email;

@@ -3,6 +3,7 @@ const express = require('express');
 const router = express.Router();
 // CHANGE 1: Import supabaseAdmin to bypass RLS for updates
 const { supabase, supabaseAdmin } = require('../config/supabase');
+const { heldInApp } = require('../config/payments');
 const authenticateToken = require('../middleware/authMiddleware');
 const { translateText } = require('../utils/autoTranslate');
 const { getDeletionBlocker, deleteAccount } = require('../services/accountDeletionService');
@@ -407,7 +408,7 @@ router.get('/counts', authenticateToken, async (req, res) => {
         // and the window has elapsed.
         const { data: ghostedBookings } = await supabaseAdmin
           .from('bookings')
-          .select('id, client_id, provider_id, total_price, services(title)')
+          .select('id, client_id, provider_id, total_price, payment_method, services(title)')
           .or(`client_id.eq.${userId},provider_id.eq.${userId}`)
           .eq('provider_confirmed', true)
           .eq('client_confirmed', false)
@@ -431,8 +432,10 @@ router.get('/counts', authenticateToken, async (req, res) => {
               .maybeSingle();
             if (!released) continue;
 
-            // 2. Transfer funds to provider's wallet (only if price > 0)
-            if (parseFloat(booking.total_price) > 0) {
+            // 2. Transfer funds to provider's wallet — only when the client's
+            // money was held in the app (direct bookings were paid outside).
+            const paidOut = heldInApp(booking);
+            if (paidOut) {
               const { data: providerWallet } = await supabaseAdmin
                 .from('wallets')
                 .select('id, balance')
@@ -472,8 +475,10 @@ router.get('/counts', authenticateToken, async (req, res) => {
             await supabaseAdmin.from('notifications').insert([
               {
                 user_id: booking.provider_id,
-                title: 'Funds Auto-Released 💰',
-                message: `Your funds for "${serviceTitle}" were automatically released. The client did not respond within 48 hours.`,
+                title: paidOut ? 'Funds Auto-Released 💰' : 'Booking Auto-Completed',
+                message: paidOut
+                  ? `Your funds for "${serviceTitle}" were automatically released. The client did not respond within 48 hours.`
+                  : `"${serviceTitle}" was automatically marked as completed. The client did not respond within 48 hours.`,
                 type: 'auto_release',
                 reference_id: booking.id,
                 is_read: false,

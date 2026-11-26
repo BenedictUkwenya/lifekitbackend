@@ -4,6 +4,7 @@ const router = express.Router();
 const { supabaseAdmin, supabase } = require('../config/supabase');
 const authenticateAdmin  = require('../middleware/adminMiddleware');
 const authenticateToken  = require('../middleware/authMiddleware');
+const { requireInAppPayments } = require('../config/payments');
 
 // =============================================================================
 // PUBLIC / USER ROUTES
@@ -192,7 +193,7 @@ function startOfToday() {
   return d;
 }
 
-router.post('/buy-ticket', authenticateToken, async (req, res) => {
+router.post('/buy-ticket', authenticateToken, requireInAppPayments, async (req, res) => {
   const { event_id } = req.body;
   const quantity = Number(req.body.quantity);
   const userId = req.user.id;
