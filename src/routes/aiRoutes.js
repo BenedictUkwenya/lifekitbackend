@@ -442,7 +442,12 @@ EXISTING CATEGORIES: ${JSON.stringify(categories ?? [])}
 
 Rules:
 1. For 'communities': if an existing community matches the user's interests, return its exact 'id' and set 'is_new' to false. If none match well, suggest a new one with 'id' set to null and 'is_new' set to true.
-2. For 'plan': each task MUST include an 'action_route' field chosen EXACTLY from this list: ["profile", "create_service", "explore", "none"].
+2. For 'plan': each task MUST include an 'action_route' field chosen EXACTLY from this list, picking the screen where the user does the task:
+   "profile" (edit profile, photo, bio), "create_service" (list a new service), "my_services" (review or update their services, prices, availability),
+   "explore" (browse services), "feeds" (post, share, reach out to people), "communities" (join or introduce themselves in a community),
+   "bookings" (handle booking requests), "payment_details" (say how clients can pay them). Use "none" only if no screen fits.
+   Payments: LifeKit does not take or hold payments — clients pay providers directly. Never mention a wallet, top-ups or in-app payouts.
+   A task about getting paid must be about adding payment details (route "payment_details").
 3. For 'services_to_offer': suggest services using an existing category name where possible.
 
 Write all human-readable strings in clear, natural English. The backend will translate them to the user's language afterwards.
@@ -453,10 +458,10 @@ You MUST return STRICT JSON matching this exact schema:
     { "day": 1, "task": "Actionable task", "action_route": "explore" },
     { "day": 2, "task": "Actionable task", "action_route": "profile" },
     { "day": 3, "task": "Actionable task", "action_route": "create_service" },
-    { "day": 4, "task": "Actionable task", "action_route": "none" },
-    { "day": 5, "task": "Actionable task", "action_route": "profile" },
-    { "day": 6, "task": "Actionable task", "action_route": "none" },
-    { "day": 7, "task": "Actionable task", "action_route": "none" }
+    { "day": 4, "task": "Actionable task", "action_route": "communities" },
+    { "day": 5, "task": "Actionable task", "action_route": "payment_details" },
+    { "day": 6, "task": "Actionable task", "action_route": "feeds" },
+    { "day": 7, "task": "Actionable task", "action_route": "my_services" }
   ],
   "communities": [
     { "name": "Community name", "id": "uuid-or-null", "is_new": false, "reason": "Why join or create this" }
@@ -488,7 +493,7 @@ Do not include any explanation, markdown, or extra text outside the JSON object.
       return res.status(502).json({ error: 'AI response did not match the expected format.' });
     }
 
-    const ROUTES = new Set(['profile', 'create_service', 'explore', 'none']);
+    const ROUTES = new Set(['profile', 'create_service', 'my_services', 'explore', 'feeds', 'communities', 'bookings', 'payment_details', 'none']);
     // Progress lives on each day: the plan starts now, nothing done yet.
     const startedAt = new Date().toISOString();
     parsed.plan = parsed.plan.slice(0, 7).map((d, i) => ({
