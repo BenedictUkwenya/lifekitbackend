@@ -120,7 +120,13 @@ router.get('/', authenticateToken, async (req, res) => {
       }
 
       const conversation = conversationsMap.get(otherUserId);
-      conversation.bookings.push(booking);
+      // Per-booking counts let the app open the booking that actually has the
+      // unread / latest messages (several bookings with one person share a row).
+      conversation.bookings.push({
+        ...booking,
+        unread_count: unreadForBooking,
+        last_message_at: newestMessage?.created_at || null,
+      });
       conversation.unread_count += unreadForBooking;
       if (activeStatuses.has(status)) {
         conversation.is_active = true;
@@ -142,6 +148,15 @@ router.get('/', authenticateToken, async (req, res) => {
     });
 
     const conversations = Array.from(conversationsMap.values());
+    // First booking = the one the chat opens on: unread first, then the
+    // newest message, then the most recently updated booking.
+    const ts = (v) => (v ? new Date(v).getTime() : 0);
+    conversations.forEach((c) => {
+      c.bookings.sort((a, b) =>
+        (b.unread_count > 0) - (a.unread_count > 0) ||
+        ts(b.last_message_at) - ts(a.last_message_at) ||
+        ts(b.updated_at) - ts(a.updated_at));
+    });
 
     res.status(200).json({ conversations });
 
