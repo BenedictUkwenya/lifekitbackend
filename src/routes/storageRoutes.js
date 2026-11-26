@@ -4,6 +4,21 @@ const multer = require('multer');
 // CHANGE 1: Import supabaseAdmin
 const { supabaseAdmin } = require('../config/supabase'); 
 const authenticateToken = require('../middleware/authMiddleware');
+const sharp = require('sharp');
+
+// Phone photos arrive at 1–5 MB and made the feed slow on mobile data.
+// Every image is resized and re-encoded as WebP (≈100–250 KB) before storage.
+const MAX_SIDE = { profiles: 640, avatars: 640, groups: 1280 };
+const DEFAULT_MAX_SIDE = 1440;
+
+async function optimizeImage(buffer, folder) {
+  const max = MAX_SIDE[folder] || DEFAULT_MAX_SIDE;
+  return sharp(buffer, { failOn: 'none' })
+    .rotate() // apply the camera's EXIF orientation, then drop the metadata
+    .resize({ width: max, height: max, fit: 'inside', withoutEnlargement: true })
+    .webp({ quality: 78, effort: 4 })
+    .toBuffer();
+}
 
 const upload = multer({ 
   storage: multer.memoryStorage(),
@@ -25,15 +40,30 @@ router.post('/upload/:folder', authenticateToken, upload.single('file'), async (
   }
 
   const timestamp = Date.now();
-  const sanitizedName = file.originalname.replace(/[^a-zA-Z0-9.]/g, '_');
-  const filePath = `${folder}/${userId}/${timestamp}_${sanitizedName}`;
+  let body = file.buffer;
+  let contentType = file.mimetype;
+  let baseName = file.originalname.replace(/[^a-zA-Z0-9.]/g, '_');
+  if ((file.mimetype || '').startsWith('image/') && file.mimetype !== 'image/gif') {
+    try {
+      body = await optimizeImage(file.buffer, folder);
+      contentType = 'image/webp';
+      baseName = baseName.replace(/.[a-zA-Z0-9]+$/, '') + '.webp';
+    } catch (e) {
+      // Unreadable by sharp (rare formats): keep the original rather than fail.
+      console.warn('Image optimisation skipped:', e.message);
+    }
+  }
+  const filePath = `${folder}/${userId}/${timestamp}_${baseName}`;
 
   try {
     // CHANGE 2: Use supabaseAdmin instead of supabase
     const { data: uploadData, error: uploadError } = await supabaseAdmin.storage
       .from(BUCKET_NAME)
-      .upload(filePath, file.buffer, {
-        contentType: file.mimetype,
+      .upload(filePath, body, {
+        contentType,
+        // Paths are unique per upload, so the file never changes: let phones
+        // and the CDN keep it for a year instead of re-downloading.
+        cacheControl: '31536000',
         upsert: false
       });
 

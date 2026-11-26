@@ -116,11 +116,20 @@ router.get('/posts', authenticateToken, async (req, res) => {
       return new Date(b.created_at) - new Date(a.created_at);
     });
 
+    // Which of these posts the viewer has bookmarked (one query).
+    const savedIds = new Set();
+    try {
+      const { data: saved } = await supabaseAdmin
+        .from('saved_posts').select('post_id').eq('user_id', userId);
+      (saved || []).forEach((r) => savedIds.add(r.post_id));
+    } catch (_) {}
+
     const formatted = enriched.map((p) => ({
       ...p,
       is_liked_by_me: Array.isArray(p.post_likes)
         ? p.post_likes.some((l) => l.user_id === userId)
         : false,
+      is_saved_by_me: savedIds.has(p.id),
       _is_recent_trending: undefined,
       _trending_score: undefined
     }));
@@ -315,11 +324,10 @@ router.delete('/posts/:id/comments/:commentId', authenticateToken, async (req, r
     const { error } = await supabaseAdmin.from('post_comments').delete().eq('id', commentId);
     if (error) throw error;
 
-    // Decrement comments_count
-    const { data: post } = await supabaseAdmin.from('posts').select('comments_count').eq('id', comment.post_id).single();
-    if (post) {
-      await supabaseAdmin.from('posts').update({ comments_count: Math.max(0, (post.comments_count || 1) - 1) }).eq('id', comment.post_id);
-    }
+    // Replies are deleted with their parent (FK cascade), so recount.
+    const { count } = await supabaseAdmin
+      .from('post_comments').select('id', { count: 'exact', head: true }).eq('post_id', comment.post_id);
+    await supabaseAdmin.from('posts').update({ comments_count: count || 0 }).eq('id', comment.post_id);
     res.json({ message: 'Comment deleted.' });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -339,15 +347,15 @@ router.post('/posts/:id/like', authenticateToken, async (req, res) => {
       .eq('user_id', userId)
       .maybeSingle();
 
-    let isLiked;
-
-    if (existingLike) {
+    const want = typeof req.body?.liked === 'boolean' ? req.body.liked : !existingLike;
+    if (want && !existingLike) {
+      const { error: insErr } = await supabaseAdmin.from('post_likes').insert({ post_id: id, user_id: userId });
+      // A duplicate from a parallel tap is fine: the post is liked either way.
+      if (insErr && insErr.code !== '23505') throw insErr;
+    } else if (!want && existingLike) {
       await supabaseAdmin.from('post_likes').delete().eq('id', existingLike.id);
-      isLiked = false;
-    } else {
-      await supabaseAdmin.from('post_likes').insert({ post_id: id, user_id: userId });
-      isLiked = true;
     }
+    const isLiked = want;
 
     const { data: likesData, error: likesError } = await supabaseAdmin
       .from('post_likes')
@@ -417,7 +425,7 @@ router.get('/posts/:id/comments', async (req, res) => {
       .from('post_comments')
       .select('*, profiles(full_name, profile_picture_url)')
       .eq('post_id', id)
-      .order('created_at', { ascending: true });
+      .order('created_at', { ascending: true }); // includes parent_id for replies
 
     if (error) throw error;
     res.json(data);
@@ -429,13 +437,28 @@ router.get('/posts/:id/comments', async (req, res) => {
 // 7. POST /feeds/posts/:id/comments - Add Comment (Auth Required)
 router.post('/posts/:id/comments', authenticateToken, async (req, res) => {
   const { id } = req.params;
-  const { content } = req.body;
+  const content = String(req.body?.content || '').trim().slice(0, 2000);
   const userId = req.user.id;
+  if (!content) return res.status(400).json({ error: 'Comment is empty.' });
 
   try {
-    const { data, error } = await supabaseAdmin 
+    // Replies attach to a top-level comment of the same post (one level deep).
+    let parentId = null;
+    let parentAuthor = null;
+    if (req.body?.parent_id) {
+      const { data: parent } = await supabaseAdmin
+        .from('post_comments').select('id, post_id, parent_id, user_id')
+        .eq('id', req.body.parent_id).maybeSingle();
+      if (!parent || parent.post_id !== id) {
+        return res.status(400).json({ error: 'That comment no longer exists.' });
+      }
+      parentId = parent.parent_id || parent.id;
+      parentAuthor = parent.user_id;
+    }
+
+    const { data, error } = await supabaseAdmin
       .from('post_comments')
-      .insert({ post_id: id, user_id: userId, content })
+      .insert({ post_id: id, user_id: userId, content, parent_id: parentId })
       .select('*, profiles(full_name, profile_picture_url)')
       .single();
 
@@ -457,8 +480,19 @@ router.post('/posts/:id/comments', authenticateToken, async (req, res) => {
       const ownerId = post.user_id;
       const commenterName = data.profiles?.full_name || 'Someone';
 
+      const preview = content.length > 80 ? content.substring(0, 77) + '...' : content;
+      if (parentAuthor && parentAuthor !== userId && parentAuthor !== ownerId) {
+        await supabaseAdmin.from('notifications').insert({
+          user_id: parentAuthor,
+          title: 'New Reply 💬',
+          message: `${commenterName} replied: "${preview}"`,
+          type: 'post_comment',
+          reference_id: id,
+          is_read: false
+        });
+      }
+
       if (ownerId && ownerId !== userId) {
-        const preview = content.length > 80 ? content.substring(0, 77) + '...' : content;
         await supabaseAdmin.from('notifications').insert({
           user_id: ownerId,
           title: 'New Comment on Your Post 💬',
@@ -493,18 +527,14 @@ router.post('/toggle-bookmark', authenticateToken, async (req, res) => {
       .eq('user_id', userId)
       .maybeSingle();
 
-    let isSaved;
-
-    if (existing) {
+    const want = typeof req.body?.saved === 'boolean' ? req.body.saved : !existing;
+    if (want && !existing) {
+      const { error: insErr } = await supabaseAdmin.from('saved_posts').insert({ post_id: postId, user_id: userId });
+      if (insErr && insErr.code !== '23505') throw insErr;
+    } else if (!want && existing) {
       await supabaseAdmin.from('saved_posts').delete().eq('id', existing.id);
-      isSaved = false;
-    } else {
-      await supabaseAdmin.from('saved_posts').insert({
-        post_id: postId,
-        user_id: userId,
-      });
-      isSaved = true;
     }
+    const isSaved = want;
 
     res.json({ is_saved: isSaved });
   } catch (error) {
@@ -517,14 +547,15 @@ router.get('/saved-posts', authenticateToken, async (req, res) => {
   const userId = req.user.id;
 
   try {
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('saved_posts')
       .select(`
         id,
         created_at,
         posts (
           *,
-          profiles (full_name, username, profile_picture_url)
+          profiles (full_name, username, profile_picture_url),
+          post_likes (user_id)
         )
       `)
       .eq('user_id', userId)
@@ -533,7 +564,12 @@ router.get('/saved-posts', authenticateToken, async (req, res) => {
     if (error) throw error;
 
     const posts = Array.isArray(data)
-      ? data.map((row) => row.posts).filter((p) => !!p)
+      ? data.map((row) => row.posts).filter((p) => !!p).map((p) => ({
+          ...p,
+          is_liked_by_me: (p.post_likes || []).some((l) => l.user_id === userId),
+          is_saved_by_me: true,
+          post_likes: undefined,
+        }))
       : [];
 
     res.json(posts);
