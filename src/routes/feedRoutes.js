@@ -211,12 +211,18 @@ router.get('/events/:id/meta', authenticateToken, async (req, res) => {
   const eventId = req.params.id;
   const userId = req.user.id;
   try {
-    // Fetch all likes for this event to compute count + "liked by me"
+    // Likes and the full discussion in parallel, in one response: the app
+    // used to wait for this call and then make a second one for comments.
     // Admin client: these tables have row security with no public policies.
-    const { data: likesData, error: likesError } = await supabaseAdmin
-      .from('event_likes')
-      .select('user_id')
-      .eq('event_id', eventId);
+    const [likesRes, commentsRes] = await Promise.all([
+      supabaseAdmin.from('event_likes').select('user_id').eq('event_id', eventId),
+      supabaseAdmin
+        .from('event_comments')
+        .select('*, profiles(full_name, profile_picture_url)')
+        .eq('event_id', eventId)
+        .order('created_at', { ascending: true }),
+    ]);
+    const { data: likesData, error: likesError } = likesRes;
     if (likesError) throw likesError;
 
     const likesCount = Array.isArray(likesData) ? likesData.length : 0;
@@ -224,11 +230,7 @@ router.get('/events/:id/meta', authenticateToken, async (req, res) => {
       ? likesData.some(l => l.user_id === userId)
       : false;
 
-    // Fetch comments just for count
-    const { data: commentsData, error: commentsError } = await supabaseAdmin
-      .from('event_comments')
-      .select('id')
-      .eq('event_id', eventId);
+    const { data: commentsData, error: commentsError } = commentsRes;
     if (commentsError) throw commentsError;
 
     const commentsCount = Array.isArray(commentsData) ? commentsData.length : 0;
@@ -236,7 +238,8 @@ router.get('/events/:id/meta', authenticateToken, async (req, res) => {
     res.json({
       likes_count: likesCount,
       comments_count: commentsCount,
-      is_liked_by_me: isLikedByMe
+      is_liked_by_me: isLikedByMe,
+      comments: commentsData || [],
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -693,11 +696,16 @@ router.get('/groups/:id', authenticateToken, async (req, res) => {
     const { data: group, error } = await supabaseAdmin.from('groups').select('*').eq('id', groupId).single();
     if (error) throw error;
 
-    const { data: member } = await supabaseAdmin.from('group_members')
-      .select('*').eq('group_id', groupId).eq('user_id', userId).maybeSingle();
+    const [{ data: member }, { count: memberCount }] = await Promise.all([
+      supabaseAdmin.from('group_members')
+        .select('*').eq('group_id', groupId).eq('user_id', userId).maybeSingle(),
+      // groups has no member_count column (the app always showed 0): count.
+      supabaseAdmin.from('group_members')
+        .select('id', { count: 'exact', head: true }).eq('group_id', groupId),
+    ]);
 
     res.json({
-      group,
+      group: { ...group, member_count: memberCount || 0, members_count: memberCount || 0 },
       isMember: !!member,
       isAdmin: member?.is_admin || false
     });
